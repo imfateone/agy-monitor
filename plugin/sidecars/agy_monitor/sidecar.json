@@ -1,0 +1,20 @@
+{
+  "command": "node",
+  "args": [
+    "server.mjs"
+  ],
+  "description": "Antigravity 会话统计、Token 缓存命中率、上下文占用拆解与每轮用量监控面板。",
+  "display_name": "AGY监控",
+  "has_web_ui": true,
+  "restart_policy": "always",
+  "ui_config": {
+    "display_name": "AGY监控",
+    "views": [
+      {
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "path": "/",
+        "title": "AGY监控"
+      }
+    ]
+  }
+}

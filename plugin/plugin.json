@@ -1,0 +1,7 @@
+{
+  "name": "agy-monitor",
+  "displayName": "AGY监控",
+  "version": "1.0.0",
+  "description": "Antigravity 会话统计、Token 缓存命中率、上下文占用拆解与每轮用量胶囊监控插件。",
+  "logo": "assets/logo.svg"
+}
