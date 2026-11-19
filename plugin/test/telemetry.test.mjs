@@ -452,6 +452,7 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
           else if (sel === '.agy-composer-footer > div:first-child' && n === root && String(c.className).includes('agy-composer-footer')) {}
           else if (sel === 'button, [role="button"]' && (c.tagName === 'BUTTON' || c.attributes.role === 'button')) out.push(c);
           else if (sel === '[data-agy-turn-host]' && 'data-agy-turn-host' in c.attributes) out.push(c);
+          else if (sel === '[data-agy-pad]' && 'data-agy-pad' in c.attributes) out.push(c);
           else if (sel.startsWith('[data-k="') && c.attributes['data-k'] === sel.slice(9, -2)) out.push(c);
           else if (sel.startsWith('[data-v="') && c.attributes['data-v'] === sel.slice(9, -2)) out.push(c);
           else if (sel.startsWith('.') && String(c.className).split(/\s+/).includes(sel.slice(1))) out.push(c);
@@ -542,6 +543,9 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   assert.ok(footerHost);
   assert.equal(surface.contains(footerHost), false);
   assert.equal(surface.nextElementSibling, footerHost);
+  assert.ok(footerHost.style.cssText.includes('padding:5px 0 0'));
+  assert.equal(outer.getAttribute('data-agy-pad'), '1');
+  assert.ok(byId('agy-monitor-layout-style')?.textContent?.includes('padding-bottom: 5px !important'));
   assert.equal(footerHost.shadowRoot.querySelector('[data-v="session"]').textContent, '1 轮 4 步 · 120 tok/s');
   assert.equal(footerHost.shadowRoot.querySelector('[data-v="tokens"]').textContent, '160K tok · 缓存命中 99%');
   assert.equal(footerHost.shadowRoot.querySelector('[data-v="context"]').textContent, '31%');
@@ -567,4 +571,8 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   const scriptBody = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
   assert.ok(scriptBody);
   new vm.Script(scriptBody);
+
+  ctx.__agyMonitorDeck.dispose();
+  assert.equal(byId('agy-monitor-layout-style'), null);
+  assert.equal(outer.hasAttribute('data-agy-pad'), false);
 });

@@ -431,7 +431,19 @@ function installRuntime(ownerTs, codeHash) {
   }
 
   // Mount standalone 3-pill strip on a dedicated bottom row below the chat composer box.
+  function ensureLayoutStyle() {
+    if (document.getElementById('agy-monitor-layout-style')) return;
+    const target = document.head || document.body;
+    if (!target) return;
+    const st = document.createElement('style');
+    st.id = 'agy-monitor-layout-style';
+    // Override Tailwind .pb-4 via attribute selector so React style updates cannot restore 16px bottom padding.
+    st.textContent = '[data-agy-pad="1"] { padding-bottom: 5px !important; }';
+    target.appendChild(st);
+  }
+
   function restoreOuterPad() {
+    document.getElementById('agy-monitor-layout-style')?.remove();
     for (const el of document.querySelectorAll('[data-agy-pad]')) {
       el.style.paddingBottom = '';
       el.removeAttribute('data-agy-pad');
@@ -458,7 +470,7 @@ function installRuntime(ownerTs, codeHash) {
     if (!host) {
       host = document.createElement('div');
       host.id = 'agy-monitor-footer-host';
-      host.style.cssText = 'display:flex;align-items:center;justify-content:safe center;width:100%;padding:6px 0 0;flex-shrink:0;overflow-x:auto;scrollbar-width:none;';
+      host.style.cssText = 'display:flex;align-items:center;justify-content:safe center;width:100%;padding:5px 0 0;flex-shrink:0;overflow-x:auto;scrollbar-width:none;';
       const shadow = host.attachShadow({ mode: 'open' });
       const style = document.createElement('style');
       style.textContent = `
@@ -514,9 +526,9 @@ function installRuntime(ownerTs, codeHash) {
       targetParent.appendChild(host);
     }
     const outerPad = (surfaceComposer || composerFooter)?.closest?.('.pb-4');
-    if (outerPad && !outerPad.hasAttribute('data-agy-pad')) {
-      outerPad.setAttribute('data-agy-pad', '1');
-      outerPad.style.paddingBottom = '6px';
+    if (outerPad) {
+      ensureLayoutStyle();
+      if (!outerPad.hasAttribute('data-agy-pad')) outerPad.setAttribute('data-agy-pad', '1');
     }
 
     const L = LABELS[d.prefs?.language === 'en' ? 'en' : 'zh-CN'];
