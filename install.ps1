@@ -7,9 +7,10 @@ Write-Host "=== AGY监控 一键安装与更新 ===" -ForegroundColor Cyan
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
     $nodeCandidates = @(
-        "D:\Tools\nodejs\node.exe",
         (Join-Path $env:ProgramFiles "nodejs\node.exe"),
-        (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe")
+        (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe"),
+        ($(if ($env:NVM_SYMLINK) { Join-Path $env:NVM_SYMLINK "node.exe" }))
     ) | Where-Object { $_ -and (Test-Path $_) }
     if ($nodeCandidates.Count -gt 0) {
         $nodeDir = Split-Path $nodeCandidates[0] -Parent
@@ -28,15 +29,21 @@ if (-not (Test-Path $srcDir)) {
     throw "未找到插件源码目录: $srcDir"
 }
 $liveDir = Join-Path $env:USERPROFILE ".gemini\config\plugins\agy-monitor"
+$backupsRoot = Join-Path $PSScriptRoot "backups"
 if (Test-Path $liveDir) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backupDir = Join-Path $PSScriptRoot "backups\$stamp"
+    $backupDir = Join-Path $backupsRoot $stamp
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     robocopy $liveDir $backupDir /E /XD node_modules __pycache__ backups | Out-Null
     if ($LASTEXITCODE -ge 8) {
         throw "备份原有插件失败，退出码: $LASTEXITCODE"
     }
     Write-Host "[2/4] 已备份原有插件至: $backupDir" -ForegroundColor DarkGray
+    Get-ChildItem -Path $backupsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}-\d{6}$' } |
+        Sort-Object Name -Descending |
+        Select-Object -Skip 5 |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Path $liveDir -Force | Out-Null
@@ -75,10 +82,45 @@ foreach ($root in $searchRoots) {
 }
 
 if ($patchedCount -eq 0) {
+    $regCandidates = @()
+    try {
+        $appKey = Get-ItemProperty -Path "HKCU:\Software\121a0be4-63bd-531e-acf8-fc3924c7e984" -ErrorAction SilentlyContinue
+        if ($appKey -and $appKey.InstallLocation) {
+            $regCandidates += (Join-Path ($appKey.InstallLocation.Trim('"')) "Antigravity.exe")
+        }
+    } catch {}
+    foreach ($uninstallRoot in @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )) {
+        try {
+            Get-ItemProperty -Path $uninstallRoot -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like "Antigravity*" -and $_.DisplayName -notlike "*IDE*" } |
+                ForEach-Object {
+                    foreach ($rawVal in @($_.InstallLocation, $_.DisplayIcon, $_.UninstallString)) {
+                        if (-not $rawVal) { continue }
+                        $val = [string]$rawVal
+                        if ($val -match '^"([^"]+?\.exe)"') {
+                            $dir = Split-Path $Matches[1] -Parent
+                            $regCandidates += (Join-Path $dir "Antigravity.exe")
+                        } elseif ($val -match '^(.*?\.exe)\b') {
+                            $dir = Split-Path $Matches[1] -Parent
+                            $regCandidates += (Join-Path $dir "Antigravity.exe")
+                        } else {
+                            $regCandidates += (Join-Path ($val.Trim('"')) "Antigravity.exe")
+                        }
+                    }
+                }
+        } catch {}
+    }
+
     $agCandidates = @(
-        (Join-Path $env:LOCALAPPDATA "Programs\Antigravity\Antigravity.exe"),
-        (Join-Path $env:ProgramFiles "Antigravity\Antigravity.exe"),
-        "D:\Tools\Antigravity\antigravity\Antigravity.exe"
+        $regCandidates +
+        @(
+            (Join-Path $env:LOCALAPPDATA "Programs\antigravity\Antigravity.exe"),
+            (Join-Path $env:ProgramFiles "Antigravity\Antigravity.exe")
+        )
     ) | Where-Object { $_ -and (Test-Path $_) }
     if ($agCandidates.Count -gt 0) {
         $exe = $agCandidates[0]
