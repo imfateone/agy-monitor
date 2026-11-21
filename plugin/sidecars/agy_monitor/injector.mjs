@@ -111,6 +111,19 @@ function installRuntime(ownerTs, codeHash) {
       toolTime: '工具调用用时',
       avgTtft: '首 token 平均（TTFT）',
       outputTps: '输出速度（TPS）',
+      compactions: '上下文压缩',
+      timesUnit: (n) => `${n} 次`,
+      subagents: '子会话',
+      subagentsNone: '0 个',
+      subagentsSummary: (c, s) => s > 0 ? `${c} 个 · ${s} 步` : `${c} 个`,
+      inclSubagents: '含子会话',
+      subagentCountUnit: (c) => `${c} 个`,
+      subagentTurnSummary: (c, tok, s) => `${c} 个 · ${tok} tok (${s} 步)`,
+      modelsCount: (n) => `${n} 个模型`,
+      reqsUnit: (n) => `${n} 次`,
+      subTabSummary: '汇总',
+      subTabModels: (n) => `分模型 (${n})`,
+      reqCountLabel: '调用次数',
       tokTitle: 'Token 用量',
       cacheHit: '缓存命中',
       cacheHitPill: (p) => `缓存命中 ${p}`,
@@ -131,6 +144,19 @@ function installRuntime(ownerTs, codeHash) {
       toolTime: 'Tool time',
       avgTtft: 'Avg TTFT',
       outputTps: 'Output speed (TPS)',
+      compactions: 'Compactions',
+      timesUnit: (n) => `${n}×`,
+      subagents: 'Subagents',
+      subagentsNone: '0',
+      subagentsSummary: (c, s) => s > 0 ? `${c} · ${s} steps` : `${c}`,
+      inclSubagents: 'Incl. subagents',
+      subagentCountUnit: (c) => `${c}`,
+      subagentTurnSummary: (c, tok, s) => `${c} · ${tok} tok (${s} steps)`,
+      modelsCount: (n) => `${n} models`,
+      reqsUnit: (n) => `${n}×`,
+      subTabSummary: 'Summary',
+      subTabModels: (n) => `By Model (${n})`,
+      reqCountLabel: 'Requests',
       tokTitle: 'Token Usage',
       cacheHit: 'Cache hit',
       cacheHitPill: (p) => `Cache ${p}`,
@@ -158,7 +184,7 @@ function installRuntime(ownerTs, codeHash) {
     const c = 2 * Math.PI * r;
     const off = c * (1 - p / 100);
     const stroke = contextColor(p);
-    return `<svg class="agm-ring" viewBox="0 0 18 18" style="width:14px;height:14px;transform:rotate(-90deg);flex-shrink:0"><circle cx="9" cy="9" r="${r}" fill="none" stroke="rgba(142,142,147,0.28)" stroke-width="2.4"/><circle cx="9" cy="9" r="${r}" fill="none" stroke="currentColor" style="stroke:${stroke}" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/></svg>`;
+    return `<svg class="agm-ring" viewBox="0 0 18 18" style="display:block;width:14px;height:14px;transform:rotate(-90deg);flex-shrink:0"><circle cx="9" cy="9" r="${r}" fill="none" stroke="rgba(142,142,147,0.28)" stroke-width="2.4"/><circle cx="9" cy="9" r="${r}" fill="none" stroke="currentColor" style="stroke:${stroke}" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/></svg>`;
   }
 
   // Ensure shared floating popover container (fixed positioning, never clipped by overflow:hidden)
@@ -175,8 +201,8 @@ function installRuntime(ownerTs, codeHash) {
         .agm-card {
           position: fixed;
           min-width: 248px;
-          max-width: min(320px, calc(100vw - 16px));
-          max-height: calc(100vh - 16px);
+          max-width: min(350px, calc(100vw - 16px));
+          max-height: min(520px, calc(100vh - 64px));
           overflow-y: auto;
           background: var(--card, light-dark(#ffffff, #1e1e22));
           color: var(--foreground, light-dark(#18181b, #f4f4f5));
@@ -187,12 +213,13 @@ function installRuntime(ownerTs, codeHash) {
           font-family: ${FONT_STACK};
           font-size: 13px;
           line-height: 1.4;
-          pointer-events: auto;
+          pointer-events: none;
           font-variant-numeric: tabular-nums;
           opacity: 0;
           transform: translateY(3px);
           transition: opacity 0.12s ease, transform 0.12s ease;
         }
+        .agm-card.pinned { pointer-events: auto; }
         .agm-card.visible { opacity: 1; transform: translateY(0); }
         .agm-head {
           display: flex;
@@ -240,6 +267,15 @@ function installRuntime(ownerTs, codeHash) {
           text-overflow: ellipsis;
           max-width: 175px;
         }
+        .agm-subrow { font-size: 12px; padding-left: 8px; gap: 10px; }
+        .agm-subrow .agm-row-k {
+          display: block;
+          min-width: 0;
+          flex: 1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .agm-subrow .agm-row-v { flex-shrink: 0; max-width: none; }
         .agm-dot {
           width: 7px;
           height: 7px;
@@ -272,6 +308,80 @@ function installRuntime(ownerTs, codeHash) {
           margin-bottom: 10px;
         }
         .agm-bar-seg { height: 100%; border-radius: 999px; transition: width 0.2s ease; }
+        .agm-subtabs {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          padding: 2px;
+          border-radius: 7px;
+          margin-bottom: 9px;
+          background: var(--secondary, light-dark(rgba(0,0,0,0.05), rgba(255,255,255,0.07)));
+          border: 1px solid var(--border, light-dark(rgba(0,0,0,0.07), rgba(255,255,255,0.09)));
+        }
+        .agm-subtab {
+          border: 0;
+          background: transparent;
+          color: var(--muted-foreground, light-dark(#71717a, #a1a1aa));
+          font: inherit;
+          font-size: 11.5px;
+          font-weight: 500;
+          padding: 3px 6px;
+          border-radius: 5px;
+          cursor: pointer;
+          white-space: nowrap;
+          transition: background 0.14s ease, color 0.14s ease;
+        }
+        .agm-subtab[aria-selected="true"] {
+          background: var(--card, light-dark(#ffffff, #26262c));
+          color: var(--foreground, light-dark(#18181b, #f4f4f5));
+          box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+          font-weight: 600;
+        }
+        .agm-mblocks { display: flex; flex-direction: column; gap: 8px; }
+        .agm-mblock {
+          padding: 8px 9px;
+          border-radius: 8px;
+          background: var(--secondary, light-dark(rgba(0,0,0,0.025), rgba(255,255,255,0.04)));
+          border: 1px solid var(--border, light-dark(rgba(0,0,0,0.06), rgba(255,255,255,0.08)));
+        }
+        .agm-mhead {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 5px;
+        }
+        .agm-mname {
+          font-size: 12.5px;
+          font-weight: 600;
+          color: var(--foreground, light-dark(#18181b, #f4f4f5));
+          min-width: 0;
+          flex: 1;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .agm-mstat {
+          font-size: 11.5px;
+          font-weight: 500;
+          color: var(--muted-foreground, light-dark(#71717a, #a1a1aa));
+          white-space: nowrap;
+          flex-shrink: 0;
+        }
+        .agm-mbar {
+          width: 100%;
+          height: 3px;
+          border-radius: 999px;
+          background: light-dark(rgba(0,0,0,0.08), rgba(255,255,255,0.12));
+          overflow: hidden;
+          margin-bottom: 6px;
+        }
+        .agm-mbar-fill {
+          display: block;
+          height: 100%;
+          border-radius: 999px;
+          background: #3b82f6;
+        }
+        .agm-mrows { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
       `;
       const card = document.createElement('div');
       card.className = 'agm-card';
@@ -285,18 +395,50 @@ function installRuntime(ownerTs, codeHash) {
   let activeAnchor = null;
   let pinnedAnchor = null;
   let hideTimer = null;
+  let activeSubTab = 'summary';
+  let activeGetHtml = null;
 
-  function showCard(anchorEl, html, pin = false) {
+  function setCardContent(card, html, resetScroll = false) {
+    if (card._lastHtml === html) {
+      if (resetScroll) card.scrollTop = 0;
+      return;
+    }
+    const prevScroll = resetScroll ? 0 : (card.scrollTop || 0);
+    card._lastHtml = html;
+    card.innerHTML = html;
+    card.scrollTop = prevScroll;
+    for (const btn of card.querySelectorAll('.agm-subtab')) {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const nextTab = btn.getAttribute('data-agm-subtab') || 'summary';
+        if (activeSubTab === nextTab && pinnedAnchor === activeAnchor) return;
+        activeSubTab = nextTab;
+        if (activeAnchor) {
+          pinnedAnchor = activeAnchor;
+          if (activeGetHtml) showCard(activeAnchor, activeGetHtml(activeSubTab), true, true);
+        }
+      });
+    }
+  }
+
+  function showCard(anchorEl, html, pin = false, resetScroll = false) {
     clearTimeout(hideTimer);
+    const switchingAnchor = anchorEl !== activeAnchor;
+    if (switchingAnchor) activeSubTab = 'summary';
     const popHost = ensurePopoverHost();
     const card = popHost.shadowRoot.querySelector('.agm-card');
-    card.innerHTML = html;
+    setCardContent(card, html, resetScroll || switchingAnchor);
     card.hidden = false;
     card.classList.remove('visible');
     activeAnchor = anchorEl;
-    if (pin) pinnedAnchor = anchorEl;
+    if (pin) {
+      pinnedAnchor = anchorEl;
+      card.classList.add('pinned');
+    } else if (pinnedAnchor !== anchorEl) {
+      card.classList.remove('pinned');
+    }
 
-    // Position above anchor if enough room, else below; clamp horizontally.
+    // Position above anchor if enough room, else below; clamp both axes to viewport.
     card.style.left = '0px';
     card.style.top = '0px';
     const rect = anchorEl.getBoundingClientRect();
@@ -304,7 +446,7 @@ function installRuntime(ownerTs, codeHash) {
     let left = rect.left + rect.width / 2 - cr.width / 2;
     left = Math.max(8, Math.min(left, window.innerWidth - cr.width - 8));
     let top = rect.top - cr.height - 8;
-    if (top < 8) top = Math.min(window.innerHeight - cr.height - 8, rect.bottom + 8);
+    if (top < 8) top = Math.max(8, Math.min(window.innerHeight - cr.height - 8, rect.bottom + 8));
     card.style.left = Math.round(left) + 'px';
     card.style.top = Math.round(top) + 'px';
     requestAnimationFrame(() => card.classList.add('visible'));
@@ -319,9 +461,14 @@ function installRuntime(ownerTs, codeHash) {
       const card = popHost?.shadowRoot?.querySelector('.agm-card');
       if (card) {
         card.classList.remove('visible');
+        card.classList.remove('pinned');
         card.hidden = true;
+        card._lastHtml = '';
+        card.scrollTop = 0;
       }
       activeAnchor = null;
+      activeGetHtml = null;
+      activeSubTab = 'summary';
     }, 90);
   }
 
@@ -329,18 +476,25 @@ function installRuntime(ownerTs, codeHash) {
     clearTimeout(hideTimer);
     pinnedAnchor = null;
     activeAnchor = null;
+    activeGetHtml = null;
+    activeSubTab = 'summary';
     const popHost = document.getElementById('agy-monitor-popover-host');
     const card = popHost?.shadowRoot?.querySelector('.agm-card');
     if (card) {
       card.classList.remove('visible');
+      card.classList.remove('pinned');
       card.hidden = true;
+      card._lastHtml = '';
+      card.scrollTop = 0;
     }
   }
 
   function bindCardInteractions(pillEl, getHtml) {
     pillEl.addEventListener('mouseenter', () => {
-      if (pinnedAnchor && pinnedAnchor !== pillEl) return;
-      showCard(pillEl, getHtml(), false);
+      if (pinnedAnchor) return;
+      const tab = activeAnchor === pillEl ? activeSubTab : 'summary';
+      activeGetHtml = getHtml;
+      showCard(pillEl, getHtml(tab), false);
     });
     pillEl.addEventListener('mouseleave', () => scheduleHide(pillEl));
     pillEl.addEventListener('click', (e) => {
@@ -348,7 +502,9 @@ function installRuntime(ownerTs, codeHash) {
       if (pinnedAnchor === pillEl) {
         closeCard();
       } else {
-        showCard(pillEl, getHtml(), true);
+        const tab = activeAnchor === pillEl ? activeSubTab : 'summary';
+        activeGetHtml = getHtml;
+        showCard(pillEl, getHtml(tab), true);
       }
     });
   }
@@ -364,38 +520,110 @@ function installRuntime(ownerTs, codeHash) {
   document.addEventListener('click', onDocClick);
   document.addEventListener('keydown', onDocKey);
 
+  function buildSubTabsHtml(count, activeTab, L) {
+    if (!(count > 1)) return '';
+    return `
+      <div class="agm-subtabs" role="tablist">
+        <button type="button" class="agm-subtab" data-agm-subtab="summary" aria-selected="${activeTab !== 'models' ? 'true' : 'false'}">${L.subTabSummary}</button>
+        <button type="button" class="agm-subtab" data-agm-subtab="models" aria-selected="${activeTab === 'models' ? 'true' : 'false'}">${esc(L.subTabModels(count))}</button>
+      </div>`;
+  }
+
+  function buildModelsPanelHtml(models, L, isEn, mode) {
+    const showTokens = mode === 'tokens' || mode === 'turn';
+    const showTiming = mode === 'session' || mode === 'turn';
+    return '<div class="agm-mblocks">' + models.map(m => {
+      const hitPct = m.cacheHitPct != null ? Math.max(0, Math.min(100, m.cacheHitPct)) : 0;
+      const headStat = mode === 'session'
+        ? `${esc(L.reqsUnit(m.reqCount || 0))} · ${fmtCompact(m.total || 0)} tok`
+        : `${fmtCompact(m.total || 0)} tok · ${esc(L.reqsUnit(m.reqCount || 0))}`;
+      const rows = [
+        `<div class="agm-row"><span class="agm-row-k">${L.cacheHit}</span><span class="agm-row-v">${fmtPct(m.cacheHitPct, 1)}</span></div>`,
+      ];
+      if (showTokens) {
+        rows.push(
+          `<div class="agm-row"><span class="agm-row-k">${L.uncachedIn}</span><span class="agm-row-v">${fmtExact(m.uncached)} tok</span></div>`,
+          `<div class="agm-row"><span class="agm-row-k">${L.cachedRead}</span><span class="agm-row-v">${fmtExact(m.cached)} tok</span></div>`,
+          `<div class="agm-row"><span class="agm-row-k">${L.output}</span><span class="agm-row-v">${fmtExact(m.output)} tok</span></div>`,
+        );
+      }
+      if (showTiming) {
+        rows.push(
+          `<div class="agm-row"><span class="agm-row-k">${L.modelTime}</span><span class="agm-row-v">${esc(fmtDur(m.modelSec || 0, isEn))}</span></div>`,
+          `<div class="agm-row"><span class="agm-row-k">${L.avgTtft}</span><span class="agm-row-v">${esc(m.avgTtftSec != null ? fmtDur(m.avgTtftSec, isEn) : '—')}</span></div>`,
+          `<div class="agm-row"><span class="agm-row-k">${L.outputTps}</span><span class="agm-row-v">${esc(fmtTps(m.tps))}</span></div>`,
+        );
+      }
+      return `
+        <div class="agm-mblock">
+          <div class="agm-mhead">
+            <span class="agm-mname" title="${esc(m.model)}">${esc(m.model)}</span>
+            <span class="agm-mstat">${headStat}</span>
+          </div>
+          <div class="agm-mbar"><span class="agm-mbar-fill" style="width:${hitPct.toFixed(1)}%"></span></div>
+          <div class="agm-mrows">${rows.join('')}</div>
+        </div>`;
+    }).join('') + '</div>';
+  }
+
   // Build HTML for the 4 AGY Monitor cards
-  function buildSessionCardHtml(d) {
+  function buildSessionCardHtml(d, subTab = 'summary') {
     const L = LABELS[d.prefs?.language === 'en' ? 'en' : 'zh-CN'];
     const isEn = d.prefs?.language === 'en';
     const s = d.session || {};
-    return `
-      <div class="agm-head">
-        <span class="agm-head-left">${SVG_GAUGE}<span>${L.sessionTitle}</span></span>
-        <span class="agm-head-right">${esc(L.turnsSteps(s.turnsCount || 0, s.stepsCount || 0))}</span>
-      </div>
+    const mb = Array.isArray(s.modelBreakdown) ? s.modelBreakdown : [];
+    const tab = subTab === 'models' && mb.length > 1 ? 'models' : 'summary';
+    const subVal = (s.subagentCount || 0) > 0
+      ? L.subagentsSummary(s.subagentCount, s.subagentStepsCount || 0)
+      : L.subagentsNone;
+    const body = tab === 'models'
+      ? buildModelsPanelHtml(mb, L, isEn, 'session')
+      : `
       <div class="agm-rows">
         <div class="agm-row"><span class="agm-row-k">${L.modelTime}</span><span class="agm-row-v">${esc(fmtDur(s.modelSec, isEn))}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.toolTime}</span><span class="agm-row-v">${esc(fmtDur(s.toolSec, isEn))}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.avgTtft}</span><span class="agm-row-v">${esc(s.avgTtftSec != null ? fmtDur(s.avgTtftSec, isEn) : '—')}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.outputTps}</span><span class="agm-row-v">${esc(fmtTps(s.tps))}</span></div>
+        <div class="agm-divider"></div>
+        <div class="agm-row"><span class="agm-row-k">${L.compactions}</span><span class="agm-row-v">${esc(L.timesUnit(s.compactionsCount || 0))}</span></div>
+        <div class="agm-row"><span class="agm-row-k">${L.subagents}</span><span class="agm-row-v">${esc(subVal)}</span></div>
       </div>`;
-  }
-
-  function buildTokensCardHtml(d) {
-    const L = LABELS[d.prefs?.language === 'en' ? 'en' : 'zh-CN'];
-    const t = d.tokens || {};
     return `
       <div class="agm-head">
-        <span class="agm-head-left">${SVG_DB}<span>${L.tokTitle}</span></span>
-        <span class="agm-head-right">${fmtExact(t.total)} tok</span>
+        <span class="agm-head-left">${SVG_GAUGE}<span>${L.sessionTitle}</span></span>
+        <span class="agm-head-right">${esc(L.turnsSteps(s.turnsCount || 0, s.stepsCount || 0))}</span>
       </div>
+      ${buildSubTabsHtml(mb.length, tab, L)}
+      ${body}`;
+  }
+
+  function buildTokensCardHtml(d, subTab = 'summary') {
+    const isEn = d.prefs?.language === 'en';
+    const L = LABELS[isEn ? 'en' : 'zh-CN'];
+    const t = d.tokens || {};
+    const mb = Array.isArray(d.session?.modelBreakdown) ? d.session.modelBreakdown : [];
+    const tab = subTab === 'models' && mb.length > 1 ? 'models' : 'summary';
+    const subCount = d.session?.subagentCount || 0;
+    const subRow = (t.subagentTotal || 0) > 0
+      ? `<div class="agm-divider"></div><div class="agm-row"><span class="agm-row-k">${L.inclSubagents}</span><span class="agm-row-v">${fmtExact(t.subagentTotal)} tok (${esc(L.subagentCountUnit(subCount))})</span></div>`
+      : '';
+    const body = tab === 'models'
+      ? buildModelsPanelHtml(mb, L, isEn, 'tokens')
+      : `
       <div class="agm-rows">
         <div class="agm-row"><span class="agm-row-k">${L.cacheHit}</span><span class="agm-row-v">${fmtPct(t.cacheHitPct, 0)}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.uncachedIn}</span><span class="agm-row-v">${fmtExact(t.uncached)} tok</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.cachedRead}</span><span class="agm-row-v">${fmtExact(t.cached)} tok</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.output}</span><span class="agm-row-v">${fmtExact(t.output)} tok</span></div>
+        ${subRow}
       </div>`;
+    return `
+      <div class="agm-head">
+        <span class="agm-head-left">${SVG_DB}<span>${L.tokTitle}</span></span>
+        <span class="agm-head-right">${fmtExact(t.total)} tok</span>
+      </div>
+      ${buildSubTabsHtml(mb.length, tab, L)}
+      ${body}`;
   }
 
   function buildContextCardHtml(d) {
@@ -425,27 +653,49 @@ function installRuntime(ownerTs, codeHash) {
       <div class="agm-rows">${rows}</div>`;
   }
 
-  function buildTurnCardHtml(turn, prefs) {
+  function buildTurnCardHtml(turn, prefs, subTab = 'summary') {
     const isEn = prefs?.language === 'en';
     const L = LABELS[isEn ? 'en' : 'zh-CN'];
-    return `
-      <div class="agm-head">
-        <span class="agm-head-left">${SVG_DB}<span>${L.turnTitle}</span></span>
-        <span class="agm-head-right">${fmtExact(turn.total)} tok</span>
-      </div>
+    const mb = Array.isArray(turn.modelBreakdown) ? turn.modelBreakdown : [];
+    const tab = subTab === 'models' && mb.length > 1 ? 'models' : 'summary';
+    const modelRowsHtml = mb.length > 1
+      ? `<div class="agm-row"><span class="agm-row-k">${L.modelLabel}</span><span class="agm-row-v">${esc(L.modelsCount(mb.length))}</span></div>`
+        + mb.map(m => `<div class="agm-row agm-subrow"><span class="agm-row-k" title="${esc(m.model)}">${esc(m.model)}</span><span class="agm-row-v">${esc(L.reqsUnit(m.reqCount || 0))}</span></div>`).join('')
+      : `<div class="agm-row"><span class="agm-row-k">${L.modelLabel}</span><span class="agm-row-v" title="${esc(turn.model || turn.modelId)}">${esc(turn.model || turn.modelId || '—')}</span></div>`;
+    const subTip = (turn.subagents || [])
+      .map(sa => `${sa.role || sa.type}: ${fmtExact(sa.totalTokens || 0)} tok (${sa.stepsCount || 0} ${isEn ? 'steps' : '步'})`)
+      .join('\n');
+    const subRowHtml = (turn.subagentCount || 0) > 0
+      ? `<div class="agm-row"><span class="agm-row-k">${L.subagents}</span><span class="agm-row-v" title="${esc(subTip)}">${esc(L.subagentTurnSummary(turn.subagentCount, fmtCompact(turn.subagentTokens || 0), turn.subagentSteps || 0))}</span></div>`
+      : '';
+    const compRowHtml = (turn.compactionsCount || 0) > 0
+      ? `<div class="agm-row"><span class="agm-row-k">${L.compactions}</span><span class="agm-row-v">${esc(L.timesUnit(turn.compactionsCount))}</span></div>`
+      : '';
+    const body = tab === 'models'
+      ? buildModelsPanelHtml(mb, L, isEn, 'turn')
+      : `
       <div class="agm-rows">
-        <div class="agm-row"><span class="agm-row-k">${L.modelLabel}</span><span class="agm-row-v" title="${esc(turn.model || turn.modelId)}">${esc(turn.model || turn.modelId || '—')}</span></div>
+        ${modelRowsHtml}
         <div class="agm-row"><span class="agm-row-k">${L.cacheHit}</span><span class="agm-row-v">${fmtPct(turn.cacheHitPct, 1)}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.uncachedIn}</span><span class="agm-row-v">${fmtExact(turn.uncached)} tok</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.cachedRead}</span><span class="agm-row-v">${fmtExact(turn.cached)} tok</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.output}</span><span class="agm-row-v">${fmtExact(turn.output)} tok</span></div>
         <div class="agm-divider"></div>
         <div class="agm-row"><span class="agm-row-k">${L.turnSteps}</span><span class="agm-row-v">${esc(L.stepsUnit(turn.stepsCount || 0))}</span></div>
+        ${subRowHtml}
         <div class="agm-row"><span class="agm-row-k">${L.modelTime}</span><span class="agm-row-v">${esc(fmtDur(turn.modelSec || 0, isEn))}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.toolTime}</span><span class="agm-row-v">${esc(fmtDur(turn.toolSec || 0, isEn))}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.avgTtft}</span><span class="agm-row-v">${esc(turn.avgTtftSec != null ? fmtDur(turn.avgTtftSec, isEn) : '—')}</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.outputTps}</span><span class="agm-row-v">${esc(fmtTps(turn.tps))}</span></div>
+        ${compRowHtml}
       </div>`;
+    return `
+      <div class="agm-head">
+        <span class="agm-head-left">${SVG_DB}<span>${L.turnTitle}</span></span>
+        <span class="agm-head-right">${fmtExact(turn.total)} tok</span>
+      </div>
+      ${buildSubTabsHtml(mb.length, tab, L)}
+      ${body}`;
   }
 
   // Mount standalone 3-pill strip on a dedicated bottom row below the chat composer box.
@@ -523,7 +773,8 @@ function installRuntime(ownerTs, codeHash) {
           background: var(--secondary, light-dark(rgba(0,0,0,0.06), rgba(255,255,255,0.10)));
           color: var(--foreground, light-dark(#18181b, #f4f4f5));
         }
-        .agm-pill svg { width: 13.5px; height: 13.5px; flex-shrink: 0; opacity: 0.85; }
+        .agm-pill svg { display: block; width: 13.5px; height: 13.5px; flex-shrink: 0; opacity: 0.85; }
+        .agm-pill [data-v="ring"] { display: inline-flex; align-items: center; justify-content: center; line-height: 0; flex-shrink: 0; }
       `;
       const strip = document.createElement('div');
       strip.className = 'agm-strip';
@@ -533,8 +784,8 @@ function installRuntime(ownerTs, codeHash) {
         <button type="button" class="agm-pill" data-k="context"><span data-v="ring"></span><span data-v="context"></span></button>
       `;
       shadow.append(style, strip);
-      bindCardInteractions(strip.querySelector('[data-k="session"]'), () => buildSessionCardHtml(state.lastData));
-      bindCardInteractions(strip.querySelector('[data-k="tokens"]'), () => buildTokensCardHtml(state.lastData));
+      bindCardInteractions(strip.querySelector('[data-k="session"]'), (tab) => buildSessionCardHtml(state.lastData, tab));
+      bindCardInteractions(strip.querySelector('[data-k="tokens"]'), (tab) => buildTokensCardHtml(state.lastData, tab));
       bindCardInteractions(strip.querySelector('[data-k="context"]'), () => buildContextCardHtml(state.lastData));
     }
     const anchorNode = surfaceComposer || composerFooter;
@@ -577,9 +828,13 @@ function installRuntime(ownerTs, codeHash) {
     // Refresh pinned popover if open on footer strip
     if (pinnedAnchor && host.shadowRoot.contains(pinnedAnchor)) {
       const k = pinnedAnchor.dataset.k;
-      const html = k === 'session' ? buildSessionCardHtml(d) : k === 'tokens' ? buildTokensCardHtml(d) : buildContextCardHtml(d);
+      const html = k === 'session'
+        ? buildSessionCardHtml(d, activeSubTab)
+        : k === 'tokens'
+          ? buildTokensCardHtml(d, activeSubTab)
+          : buildContextCardHtml(d);
       const card = document.getElementById('agy-monitor-popover-host')?.shadowRoot?.querySelector('.agm-card');
-      if (card && !card.hidden) card.innerHTML = html;
+      if (card && !card.hidden) setCardContent(card, html);
     }
   }
 
@@ -704,7 +959,7 @@ function installRuntime(ownerTs, codeHash) {
         btn.className = 'agm-turn-pill';
         btn.innerHTML = `${SVG_DB}<span data-v="txt"></span>`;
         shadow.append(style, btn);
-        bindCardInteractions(btn, () => buildTurnCardHtml(host._turnData, state.lastData?.prefs));
+        bindCardInteractions(btn, (tab) => buildTurnCardHtml(host._turnData, state.lastData?.prefs, tab));
         if (mode === 'prepend' && anchor && anchor.parentElement === bar) {
           bar.insertBefore(host, anchor);
         } else {
@@ -717,7 +972,7 @@ function installRuntime(ownerTs, codeHash) {
       if (txtEl.textContent !== label) txtEl.textContent = label;
       if (pinnedAnchor && host.shadowRoot.contains(pinnedAnchor)) {
         const card = document.getElementById('agy-monitor-popover-host')?.shadowRoot?.querySelector('.agm-card');
-        if (card && !card.hidden) card.innerHTML = buildTurnCardHtml(turn, d.prefs);
+        if (card && !card.hidden) setCardContent(card, buildTurnCardHtml(turn, d.prefs, activeSubTab));
       }
     }
 

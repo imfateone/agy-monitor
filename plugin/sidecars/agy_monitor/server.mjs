@@ -57,9 +57,26 @@ async function fetchQuota() {
 }
 
 export const EMPTY_DATA = Object.freeze({
-  session: { turnsCount: 0, stepsCount: 0, modelSec: 0, toolSec: 0, avgTtftSec: null, tps: null, model: '', modelId: '', isStreaming: false },
-  tokens: { total: 0, uncached: 0, cached: 0, output: 0, thinking: 0, cacheHitPct: null },
+  session: {
+    turnsCount: 0,
+    stepsCount: 0,
+    mainStepsCount: 0,
+    subagentStepsCount: 0,
+    compactionsCount: 0,
+    subagentCount: 0,
+    modelSec: 0,
+    toolSec: 0,
+    avgTtftSec: null,
+    tps: null,
+    model: '',
+    modelId: '',
+    models: [],
+    modelBreakdown: [],
+    isStreaming: false,
+  },
+  tokens: { total: 0, mainTotal: 0, subagentTotal: 0, uncached: 0, cached: 0, output: 0, thinking: 0, cacheHitPct: null },
   context: { usedTokens: 0, maxTokens: 0, usedPct: 0, categories: [], breakdownTotal: 0 },
+  subagents: [],
   turns: [],
 });
 
@@ -97,6 +114,7 @@ export function createTelemetryController({
     const data = dbPath && existsSync(dbPath) ? (readSnapshot(dbPath) || EMPTY_DATA) : EMPTY_DATA;
     const quota = await getQuota();
     return {
+      conversationId: targetId,
       ...data,
       ...quota,
       prefs: readSettings(),

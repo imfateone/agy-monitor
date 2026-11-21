@@ -156,6 +156,10 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     const res = buildConversationTelemetry(dbPath);
     assert.equal(res.session.turnsCount, 2);
     assert.equal(res.session.stepsCount, 8);
+    assert.equal(res.session.mainStepsCount, 8);
+    assert.equal(res.session.subagentStepsCount, 0);
+    assert.equal(res.session.compactionsCount, 1);
+    assert.equal(res.session.subagentCount, 0);
     assert.equal(res.session.modelSec, 13);
     assert.equal(res.session.toolSec, 6);
     assert.equal(res.context.usedTokens, 22000);
@@ -171,6 +175,7 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     assert.equal(res.turns[0].completed, true);
     assert.equal(res.turns[0].hasReply, true);
     assert.equal(res.turns[0].stepsCount, 6);
+    assert.equal(res.turns[0].compactionsCount, 1);
     assert.equal(res.turns[0].modelSec, 8);
     assert.equal(res.turns[0].toolSec, 6);
     assert.equal(res.turns[0].avgTtftSec, 1.5);
@@ -178,10 +183,221 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     assert.equal('_ttftSum' in res.turns[0], false);
     assert.equal(res.turns[1].completed, true);
     assert.equal(res.turns[1].stepsCount, 2);
+    assert.equal(res.turns[1].compactionsCount, 0);
     assert.equal(res.turns[1].modelSec, 5);
     assert.equal(res.turns[1].toolSec, 0);
     assert.equal(res.turns[1].avgTtftSec, 3);
     assert.equal(res.turns[1].tps, 50);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('buildConversationTelemetry aggregates multi-model turns, nested/compaction subagents, and cache invalidation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-monitor-subagent-'));
+  try {
+    const mainId = '11111111-1111-4111-8111-111111111111';
+    const childId = '22222222-2222-4222-8222-222222222222';
+    const grandId = '33333333-3333-4333-8333-333333333333';
+    const compChildId = '44444444-4444-4444-8444-444444444444';
+    const swarmA = '55555555-5555-4555-8555-555555555555';
+    const swarmB = '66666666-6666-4666-8666-666666666666';
+
+    const stepMeta = (startSec, endSec, toolName = '') => Buffer.concat([
+      fieldBytes(1, tsPb(startSec)),
+      ...(toolName ? [fieldBytes(4, Buffer.concat([fieldBytes(1, 'call_1'), fieldBytes(2, toolName)]))] : []),
+      ...(endSec ? [fieldBytes(8, tsPb(endSec))] : []),
+    ]);
+    const invokePayload = (id, role, type) => fieldBytes(140, fieldBytes(2, fieldBytes(3, fieldBytes(9, fieldBytes(5, Buffer.concat([
+      fieldBytes(1, id),
+      fieldBytes(2, role),
+      fieldBytes(3, type),
+    ]))))));
+    const swarmMultiPayload = (ids) => fieldBytes(140, Buffer.from(ids.join(' '), 'utf8'));
+    const compactionPayload = (entries) => fieldBytes(30, Buffer.concat(
+      entries.map(([id, role, type]) => fieldBytes(20, Buffer.concat([
+        fieldBytes(4, Buffer.concat([fieldBytes(1, type), fieldBytes(2, role)])),
+        fieldBytes(5, fieldBytes(1, id)),
+      ])))
+    ));
+    const initDb = (dbPath) => {
+      const d = new DatabaseSync(dbPath);
+      d.exec(`
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE trajectory_meta (trajectory_id text PRIMARY KEY, cascade_id text);
+        CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB);
+        CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+        CREATE TABLE executor_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+      `);
+      return d;
+    };
+
+    // Grandchild DB (adds an active streaming step + cycle reference back to mainId!)
+    const gDb = initDb(join(dir, `${grandId}.db`));
+    gDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?)').run('gc-traj', grandId);
+    gDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(1006, 1008), null);
+    gDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 132, 1, stepMeta(1007, 1009, 'invoke_subagent'), invokePayload(mainId, 'CycleBack', 'self'));
+    gDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [0], uncached: 200, cached: 800, out: 100, ttftSec: 1, streamSec: 1,
+      model: 'Gemini 4 Flash', modelId: 'gemini-4-flash',
+    }));
+    gDb.close();
+
+    // Child DB spawned by invoke_subagent in Turn 0; overlaps main tool interval [1004..1010] -> [1005..1012]
+    const cDb = initDb(join(dir, `${childId}.db`));
+    cDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?)').run('ch-traj', childId);
+    cDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(1005, 1007), null);
+    cDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 132, 3, stepMeta(1005, 1012, 'invoke_subagent'), invokePayload(grandId, 'Grand Helper', 'research'));
+    cDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [0], uncached: 500, cached: 1500, out: 200, ttftSec: 2, streamSec: 2,
+      model: 'Orchestrator (Neon)', modelId: 'gemini-pro-orchestrator-neon',
+    }));
+    cDb.close();
+
+    // Extra subagent only recorded inside compaction step_type=23 f30.20 (no direct step_payload on launch step)
+    const fDb = initDb(join(dir, `${compChildId}.db`));
+    fDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?)').run('fc-traj', compChildId);
+    fDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 5, stepMeta(1020, 1022), null);
+    fDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [0], uncached: 100, cached: 400, out: 50, ttftSec: 1, streamSec: 1,
+      model: 'Gemini 4 Hydrogen (High)', modelId: 'gemini-4-hydrogen-tiered-high',
+    }));
+    fDb.close();
+
+    // Two swarm workers spawned by Turn 1 (discovered via multi-UUID fallback without f140.2.3.9.5)
+    for (const [wid, st, tokOut] of [[swarmA, 3, 200], [swarmB, 1, 300]]) {
+      const sDb = initDb(join(dir, `${wid}.db`));
+      sDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?)').run(`sw-${wid.slice(0, 4)}`, wid);
+      sDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, st, stepMeta(2001, 2002), null);
+      sDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+        stepIdxs: [0], uncached: tokOut, cached: 0, out: 50, ttftSec: 1, streamSec: 1,
+        model: 'Gemini 4 Flash', modelId: 'gemini-4-flash',
+      }));
+      sDb.close();
+    }
+
+    // Main DB: Turn 0 uses Neon x1 + Hydrogen x2, launches Child, triggers compaction checkpoint; Turn 1 after compaction launches swarm x2
+    const mainPath = join(dir, `${mainId}.db`);
+    const mDb = initDb(mainPath);
+    mDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?)').run('main-traj', mainId);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 14, 3, stepMeta(1000), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 15, 3, stepMeta(1000, 1002), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(2, 132, 3, stepMeta(1004, 1010, 'invoke_subagent'), invokePayload(childId, 'Code Reviewer', 'research'));
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(3, 15, 3, stepMeta(1010, 1012), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(4, 15, 3, stepMeta(1012, 1014), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(5, 23, 3, stepMeta(1030, 1031), compactionPayload([
+      [childId, 'Code Reviewer', 'research'],
+      [compChildId, 'Art Backup', 'image-generator'],
+    ]));
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(6, 14, 3, stepMeta(2000), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(7, 15, 3, stepMeta(2000, 2003), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(8, 132, 3, stepMeta(2001, 2002, 'swarm'), swarmMultiPayload([swarmA, swarmB]));
+
+    mDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [1], uncached: 10000, cached: 0, out: 200, ttftSec: 1, streamSec: 1,
+      model: 'Gemini 4 Neon (XHigh)', modelId: 'gemini-4-neon',
+    }));
+    mDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(1, makeGen({
+      stepIdxs: [3], uncached: 1000, cached: 10000, out: 150, ttftSec: 2, streamSec: 2,
+      model: 'Gemini 4 Hydrogen (XHigh)', modelId: 'gemini-4-hydrogen',
+    }));
+    mDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(2, makeGen({
+      stepIdxs: [4], uncached: 1000, cached: 11000, out: 250, ttftSec: 2, streamSec: 2,
+      model: 'Gemini 4 Hydrogen (XHigh)', modelId: 'gemini-4-hydrogen',
+    }));
+    mDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(3, makeGen({
+      stepIdxs: [7], uncached: 3000, cached: 17000, out: 400, ttftSec: 1, streamSec: 2,
+      model: 'Gemini 4 Hydrogen (XHigh)', modelId: 'gemini-4-hydrogen',
+    }));
+    mDb.close();
+
+    const cache = createSnapshotCache(buildConversationTelemetry);
+    const snap1 = cache.read(mainPath);
+    assert.equal(snap1.session.compactionsCount, 1);
+    assert.equal(snap1.session.subagentCount, 5); // child + grand + compChild + swarmA + swarmB
+    assert.equal(snap1.session.mainStepsCount, 9);
+    assert.equal(snap1.session.subagentStepsCount, 7); // 2 + 2 + 1 + 1 + 1
+    assert.equal(snap1.session.stepsCount, 16);
+    assert.equal(snap1.session.isStreaming, true); // propagated from grandchild & swarmB
+
+    // Tokens roll up main + subagents while context strictly reflects main DB
+    const expectedMainTok = 10200 + 11150 + 12250 + 20400; // 54,000
+    const expectedSubTok = 2200 + 1100 + 550 + 250 + 350; // 4,450
+    assert.equal(snap1.tokens.mainTotal, expectedMainTok);
+    assert.equal(snap1.tokens.subagentTotal, expectedSubTok);
+    assert.equal(snap1.tokens.total, expectedMainTok + expectedSubTok);
+    assert.equal(snap1.context.usedTokens, 20000);
+
+    // Merged tool intervals: Turn 0 [1004..1010] | [1005..1012] | [1007..1009] => 8s; Turn 1 [2001..2002] => 1s => 9s total
+    assert.equal(snap1.session.toolSec, 9);
+
+    // Turn 0 is historical (Turn 1 exists), so even if grandchild is active, Turn 0 stays completed=true!
+    const t0 = snap1.turns[0];
+    assert.equal(t0.compactionsCount, 1);
+    assert.equal(t0.subagentCount, 2); // Child + Grandchild (compChild had launchedAtStep=-1)
+    assert.equal(t0.subagentTokens, 3300);
+    assert.equal(t0.subagentSteps, 4);
+    assert.equal(t0.stepsCount, 10); // 6 main + 4 child/grandchild
+    assert.equal(t0.completed, true);
+
+    // Latest Turn 1 DOES wait for its active swarm worker (swarmB)
+    const t1 = snap1.turns[1];
+    assert.equal(t1.subagentCount, 2);
+    assert.equal(t1.subagentTokens, 600);
+    assert.equal(t1.completed, false);
+    assert.deepEqual(
+      t0.modelBreakdown.map(m => [m.model, m.reqCount]),
+      [
+        ['Gemini 4 Neon (XHigh)', 1],
+        ['Gemini 4 Hydrogen (XHigh)', 2],
+        ['Orchestrator (Neon)', 1],
+        ['Gemini 4 Flash', 1],
+      ],
+    );
+    const t0Hydrogen = t0.modelBreakdown.find(m => m.model === 'Gemini 4 Hydrogen (XHigh)');
+    assert.equal(t0Hydrogen.total, 23400);
+    assert.equal(t0Hydrogen.uncached, 2000);
+    assert.equal(t0Hydrogen.cached, 21000);
+    assert.equal(t0Hydrogen.output, 400);
+    assert.ok(Math.abs(t0Hydrogen.cacheHitPct - (21000 / 23000) * 100) < 1e-9);
+    assert.equal(t0Hydrogen.modelSec, 8);
+    assert.equal(t0Hydrogen.avgTtftSec, 2);
+    assert.equal(t0Hydrogen.tps, 50);
+    assert.equal('_ttftSum' in t0Hydrogen, false);
+
+    const sessHydrogen = snap1.session.modelBreakdown.find(m => m.model === 'Gemini 4 Hydrogen (XHigh)');
+    assert.equal(sessHydrogen.reqCount, 3);
+    assert.equal(sessHydrogen.total, 43800);
+    assert.ok(Math.abs(sessHydrogen.cacheHitPct - (38000 / 43000) * 100) < 1e-9);
+    assert.equal(sessHydrogen.modelSec, 11);
+    assert.ok(Math.abs(sessHydrogen.avgTtftSec - (5 / 3)) < 1e-9);
+    assert.ok(Math.abs(sessHydrogen.tps - (800 / 11)) < 1e-9);
+    assert.equal(
+      snap1.session.modelBreakdown.reduce((sum, m) => sum + m.total, 0),
+      snap1.tokens.total,
+    );
+
+    // Cache hit returns identical ref when nothing changed
+    assert.equal(cache.read(mainPath), snap1);
+
+    // Transient SQLite lock on a child DB preserves snap1 instead of dropping/caching partial data!
+    const lockDb = new DatabaseSync(join(dir, `${grandId}.db`));
+    lockDb.exec('BEGIN EXCLUSIVE; UPDATE steps SET status=1 WHERE idx=0;');
+    const snapDuringLock = cache.read(mainPath);
+    assert.equal(snapDuringLock, snap1);
+    lockDb.exec('ROLLBACK;');
+    lockDb.close();
+
+    // Once child & swarm worker finish, cache invalidates cleanly and reflects completed=true
+    for (const [id, stepIdx] of [[grandId, 1], [swarmB, 0]]) {
+      const wd = new DatabaseSync(join(dir, `${id}.db`));
+      wd.prepare('UPDATE steps SET status=3 WHERE idx=?').run(stepIdx);
+      wd.close();
+    }
+    const snap2 = cache.read(mainPath);
+    assert.notEqual(snap2, snap1);
+    assert.equal(snap2.session.isStreaming, false);
+    assert.equal(snap2.turns[1].completed, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -284,6 +500,7 @@ test('createTelemetryController isolates multi-window and empty home tabs from s
     // Window A focused registers convA
     const resA = await controller(convA, { exact: true, focused: true });
     assert.equal(resA.session.model, 'ModelA');
+    assert.equal(resA.conversationId, convA);
 
     // Window B unfocused does NOT hijack lastDeckConvId, and blank home window does NOT wipe it
     const resB = await controller(convB, { exact: true, focused: false });
@@ -341,7 +558,7 @@ test('settings store validates and persists patches', () => {
   }
 });
 
-test('runtime bundle and sidebar HTML compile cleanly and mount outside composer', () => {
+test('runtime bundle and sidebar HTML compile cleanly and mount outside composer', async () => {
   const bundle = buildRuntimeBundle(123456);
   assert.ok(bundle.code.includes('__agyMonitorDeck'));
   assert.equal(bundle.hash.length, 16);
@@ -355,6 +572,7 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
       tagName: tag.toUpperCase(),
       className,
       style: {},
+      scrollTop: 0,
       classList: {
         add(cls) { el.className = Array.from(new Set([...String(el.className || '').split(/\s+/).filter(Boolean), cls])).join(' '); },
         remove(cls) { el.className = String(el.className || '').split(/\s+/).filter(c => c && c !== cls).join(' '); },
@@ -547,9 +765,51 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
 
   assert.equal(vm.runInContext(bundle.code, ctx), true);
   const sampleData = {
-    session: { turnsCount: 1, stepsCount: 4, modelSec: 4, toolSec: 2, avgTtftSec: 1.2, tps: 120 },
-    tokens: { total: 160000, uncached: 1000, cached: 158000, output: 1000, cacheHitPct: 99.4 },
+    session: {
+      turnsCount: 1,
+      stepsCount: 14,
+      mainStepsCount: 4,
+      subagentStepsCount: 10,
+      compactionsCount: 2,
+      subagentCount: 1,
+      modelSec: 4,
+      toolSec: 2,
+      avgTtftSec: 1.2,
+      tps: 120,
+      modelBreakdown: [
+        {
+          model: 'Gemini 4 Neon',
+          modelId: 'gemini-4-neon',
+          reqCount: 1,
+          total: 50000,
+          tokens: 50000,
+          uncached: 10000,
+          cached: 39500,
+          output: 500,
+          cacheHitPct: 79.8,
+          modelSec: 1.5,
+          avgTtftSec: 1.0,
+          tps: 80,
+        },
+        {
+          model: 'Gemini 4 Hydrogen',
+          modelId: 'gemini-4-hydrogen',
+          reqCount: 3,
+          total: 110000,
+          tokens: 110000,
+          uncached: 1000,
+          cached: 108500,
+          output: 500,
+          cacheHitPct: 99.1,
+          modelSec: 2.5,
+          avgTtftSec: 1.3,
+          tps: 140,
+        },
+      ],
+    },
+    tokens: { total: 160000, mainTotal: 150000, subagentTotal: 10000, uncached: 1000, cached: 158000, output: 1000, cacheHitPct: 99.4 },
     context: { usedTokens: 159000, maxTokens: 512000, usedPct: 31, categories: [] },
+    subagents: [{ id: 'sub-1', role: 'Code Reviewer', type: 'research', model: 'Orchestrator (Neon)', stepsCount: 10, totalTokens: 10000, isStreaming: false }],
     turns: [{
       turnIndex: 0,
       completed: true,
@@ -559,13 +819,48 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
       uncached: 1000,
       cached: 158000,
       output: 1000,
-      stepsCount: 4,
+      stepsCount: 14,
+      compactionsCount: 1,
+      subagentCount: 1,
+      subagentTokens: 10000,
+      subagentSteps: 10,
+      subagents: [{ id: 'sub-1', role: 'Code Reviewer', type: 'research', model: 'Orchestrator (Neon)', stepsCount: 10, totalTokens: 10000 }],
       modelSec: 4,
       toolSec: 2,
       avgTtftSec: 1.2,
       tps: 120,
       endedAtMs: Date.now() - 60_000,
       model: 'Gemini 4 Hydrogen',
+      modelBreakdown: [
+        {
+          model: 'Gemini 4 Neon',
+          modelId: 'gemini-4-neon',
+          reqCount: 1,
+          total: 50000,
+          tokens: 50000,
+          uncached: 10000,
+          cached: 39500,
+          output: 500,
+          cacheHitPct: 79.8,
+          modelSec: 1.5,
+          avgTtftSec: 1.0,
+          tps: 80,
+        },
+        {
+          model: 'Gemini 4 Hydrogen',
+          modelId: 'gemini-4-hydrogen',
+          reqCount: 3,
+          total: 110000,
+          tokens: 110000,
+          uncached: 1000,
+          cached: 108500,
+          output: 500,
+          cacheHitPct: 99.1,
+          modelSec: 2.5,
+          avgTtftSec: 1.3,
+          tps: 140,
+        },
+      ],
     }],
     prefs: { language: 'zh-CN', enableFooterBar: true, enableTurnPills: true },
   };
@@ -579,21 +874,82 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   assert.ok(footerHost.style.cssText.includes('padding:5px 0 0'));
   assert.equal(outer.getAttribute('data-agy-pad'), '1');
   assert.ok(byId('agy-monitor-layout-style')?.textContent?.includes('padding-bottom: 5px !important'));
-  assert.equal(footerHost.shadowRoot.querySelector('[data-v="session"]').textContent, '1 轮 4 步 · 120 tok/s');
+  assert.equal(footerHost.shadowRoot.querySelector('[data-v="session"]').textContent, '1 轮 14 步 · 120 tok/s');
   assert.equal(footerHost.shadowRoot.querySelector('[data-v="tokens"]').textContent, '160K tok · 缓存命中 99%');
   assert.equal(footerHost.shadowRoot.querySelector('[data-v="context"]').textContent, '31%');
+  const ringSpanHtml = footerHost.shadowRoot.querySelector('[data-v="ring"]').innerHTML;
+  assert.ok(ringSpanHtml.includes('display:block'), 'Context ring SVG must use display:block to avoid baseline shift');
+  assert.ok(footerHost.shadowRoot.children[0].textContent.includes('.agm-pill [data-v="ring"]'), 'Footer style must center ring span wrapper');
   assert.equal(ctx.__agyMonitorDeck.readState(123456).matchedTurnFooters, 1);
+
+  // Hover opens non-pinned preview that hides on mouseleave; click pins card so leaving stays open & subtabs work
+  const sessionPillBtn = footerHost.shadowRoot.querySelector('[data-k="session"]');
+  sessionPillBtn.dispatchEvent('mouseenter');
+  const popCard = byId('agy-monitor-popover-host')?.shadowRoot?.querySelector('.agm-card');
+  assert.ok(popCard && !popCard.hidden);
+  assert.equal(popCard.className.split(/\s+/).includes('pinned'), false);
+  sessionPillBtn.dispatchEvent('mouseleave');
+  await new Promise(r => setTimeout(r, 120));
+  assert.equal(popCard.hidden, true);
+
+  sessionPillBtn.dispatchEvent('click', { stopPropagation() {} });
+  assert.equal(popCard.hidden, false);
+  assert.equal(popCard.className.split(/\s+/).includes('pinned'), true);
+  sessionPillBtn.dispatchEvent('mouseleave');
+  await new Promise(r => setTimeout(r, 120));
+  assert.equal(popCard.hidden, false);
+  for (const needle of ['上下文压缩', '2 次', '子会话', '1 个 · 10 步', '分模型 (2)']) {
+    assert.ok(popCard.innerHTML.includes(needle), `Missing session popover text: ${needle}`);
+  }
+  popCard.querySelectorAll('.agm-subtab')[1].dispatchEvent('click', { stopPropagation() {} });
+  for (const needle of ['Gemini 4 Neon', '79.8%', '1.5 秒', 'Gemini 4 Hydrogen', '99.1%', '140 tok/s']) {
+    assert.ok(popCard.innerHTML.includes(needle), `Missing session by-model popover text: ${needle}`);
+  }
+
+  // Click token pill (resets sub-tab to summary), then switch to "分模型 (2)" and verify live refresh preserves it
+  const tokensPillBtn = footerHost.shadowRoot.querySelector('[data-k="tokens"]');
+  tokensPillBtn.dispatchEvent('click', { stopPropagation() {} });
+  assert.ok(popCard.innerHTML.includes('含子会话') && popCard.innerHTML.includes('10,000 tok (1 个)'));
+  popCard.querySelectorAll('.agm-subtab')[1].dispatchEvent('click', { stopPropagation() {} });
+  for (const needle of ['Gemini 4 Neon', '79.8%', '10,000 tok', '39,500 tok', 'Gemini 4 Hydrogen', '99.1%', '108,500 tok']) {
+    assert.ok(popCard.innerHTML.includes(needle), `Missing tokens by-model popover text: ${needle}`);
+  }
+  assert.equal(ctx.__agyMonitorDeck.apply(sampleData, '/c/11111111-1111-1111-1111-111111111111', 123456), true);
+  assert.ok(popCard.innerHTML.includes('108,500 tok'), 'Live apply() should preserve pinned tokens models sub-tab');
+
+  // Identical or live-updated apply() preserves popCard.scrollTop cleanly; switching subtabs resets it
+  popCard.scrollTop = 42;
+  assert.equal(ctx.__agyMonitorDeck.apply(sampleData, '/c/11111111-1111-1111-1111-111111111111', 123456), true);
+  assert.equal(popCard.scrollTop, 42);
+  const updatedSample = { ...sampleData, tokens: { ...sampleData.tokens, total: 161000 } };
+  assert.equal(ctx.__agyMonitorDeck.apply(updatedSample, '/c/11111111-1111-1111-1111-111111111111', 123456), true);
+  assert.equal(popCard.scrollTop, 42);
+  popCard.querySelectorAll('.agm-subtab')[0].dispatchEvent('click', { stopPropagation() {} });
+  assert.equal(popCard.scrollTop, 0);
+
+  // Short viewport clamp ensures top never goes below 8px
+  ctx.window.innerHeight = 120;
+  popCard._rect = { left: 0, top: 0, width: 280, height: 180, right: 280, bottom: 180 };
+  tokensPillBtn.dispatchEvent('click', { stopPropagation() {} }); // closes pinned
+  tokensPillBtn.dispatchEvent('click', { stopPropagation() {} }); // re-opens pinned in short viewport
+  assert.ok(parseInt(popCard.style.top, 10) >= 8, `Expected clamped top >= 8, got ${popCard.style.top}`);
+  ctx.window.innerHeight = 851;
+  delete popCard._rect;
+
   const turnHost = findAll(d3, '[data-agy-turn-host]')[0];
   assert.ok(turnHost);
   assert.equal(turnHost.shadowRoot.querySelector('[data-v="txt"]').textContent, '用量 160K tok');
 
-  // Click per-turn pill and verify popover card contains both token usage and session-stats rows
+  // Click per-turn pill, verify summary + switch to per-turn "分模型 (2)" view
   const turnPillBtn = turnHost.shadowRoot.querySelector('.agm-turn-pill');
   turnPillBtn.dispatchEvent('click', { stopPropagation() {} });
-  const popCard = byId('agy-monitor-popover-host')?.shadowRoot?.querySelector('.agm-card');
   assert.ok(popCard && !popCard.hidden);
-  for (const needle of ['本轮步数', '4 步', '模型用时', '4.0 秒', '工具调用用时', '2.0 秒', '首 token 平均（TTFT）', '1.2 秒', '输出速度（TPS）', '120 tok/s']) {
+  for (const needle of ['2 个模型', 'Gemini 4 Neon', '1 次', 'Gemini 4 Hydrogen', '3 次', '子会话', '1 个 · 10K tok (10 步)', '上下文压缩', '本轮步数', '14 步', '模型用时', '4.0 秒', '工具调用用时', '2.0 秒', '首 token 平均（TTFT）', '1.2 秒', '输出速度（TPS）', '120 tok/s']) {
     assert.ok(popCard.innerHTML.includes(needle), `Missing turn popover text: ${needle}`);
+  }
+  popCard.querySelectorAll('.agm-subtab')[1].dispatchEvent('click', { stopPropagation() {} });
+  for (const needle of ['Gemini 4 Neon', '79.8%', '80 tok/s', 'Gemini 4 Hydrogen', '99.1%', '140 tok/s']) {
+    assert.ok(popCard.innerHTML.includes(needle), `Missing turn by-model popover text: ${needle}`);
   }
   assert.ok(footerHost.shadowRoot.querySelector('[data-k="context"]').style.color.includes('hsl(123,'));
   assert.ok(footerHost.shadowRoot.querySelector('[data-v="ring"]').innerHTML.includes('hsl(123,'));
@@ -610,6 +966,14 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   const html = renderSidebarHtml();
   assert.ok(html.includes('AGY监控'));
   assert.ok(html.includes('Provider / Model'));
+  assert.ok(html.includes('分模型'));
+  assert.ok(html.includes('lastConvId'));
+  assert.ok(html.includes('lastOverviewHtml'));
+  assert.ok(html.includes('lastTurnsHtml'));
+  assert.ok(html.includes('turnSubTabs'));
+  assert.ok(html.includes('上下文压缩'));
+  assert.ok(html.includes('子会话明细'));
+  assert.ok(html.includes('含子会话'));
   assert.ok(html.includes('本轮步数'));
   assert.ok(html.includes('turn.modelSec'));
   assert.ok(html.includes('turn.toolSec'));
