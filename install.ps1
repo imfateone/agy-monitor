@@ -6,12 +6,12 @@ Write-Host "=== AGY监控 一键安装与更新 ===" -ForegroundColor Cyan
 # 1. 检测 Node.js（Antigravity sidecar 运行依赖）
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
-    $nodeCandidates = @(
+    $nodeCandidates = @(@(
         (Join-Path $env:ProgramFiles "nodejs\node.exe"),
         (Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"),
         (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe"),
         ($(if ($env:NVM_SYMLINK) { Join-Path $env:NVM_SYMLINK "node.exe" }))
-    ) | Where-Object { $_ -and (Test-Path $_) }
+    ) | Where-Object { $_ -and (Test-Path $_) })
     if ($nodeCandidates.Count -gt 0) {
         $nodeDir = Split-Path $nodeCandidates[0] -Parent
         $env:Path = "$nodeDir;$env:Path"
@@ -19,9 +19,16 @@ if (-not $nodeCmd) {
     }
 }
 if (-not $nodeCmd) {
-    throw "未检测到 Node.js，请先安装 Node.js (https://nodejs.org/) 并确保 node 在 PATH 中后再运行本脚本。"
+    throw "未检测到 Node.js，请先安装 Node.js 22.13+ LTS (https://nodejs.org/) 并确保 node 在 PATH 中后再运行本脚本。"
 }
-Write-Host "[1/4] Node.js 就绪: $(& node --version)" -ForegroundColor Green
+$nodeVerStr = (& node --version).Trim()
+Write-Host "[1/4] Node.js 就绪: $nodeVerStr" -ForegroundColor Green
+if ($nodeVerStr -match '^v(\d+)\.(\d+)\.(\d+)') {
+    $nodeVer = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+    if ($nodeVer -lt [version]"22.13.0") {
+        Write-Warning "检测到当前 Node.js 版本为 $nodeVerStr；AGY监控 依赖内置 node:sqlite，建议升级至 Node.js 22.13+ LTS 以获完整支持。"
+    }
+}
 
 # 2. 备份并安装插件到 %USERPROFILE%\.gemini\config\plugins\agy-monitor
 $srcDir = Join-Path $PSScriptRoot "plugin"
@@ -57,7 +64,7 @@ Write-Host "[2/4] 插件已安装/更新至: $liveDir" -ForegroundColor Green
 $ws = New-Object -ComObject WScript.Shell
 $desktop = [Environment]::GetFolderPath("Desktop")
 $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
-$searchRoots = @($desktop, $startMenu) | Where-Object { $_ -and (Test-Path $_) }
+$searchRoots = @(@($desktop, $startMenu) | Where-Object { $_ -and (Test-Path $_) })
 
 $patchedCount = 0
 foreach ($root in $searchRoots) {
@@ -115,13 +122,13 @@ if ($patchedCount -eq 0) {
         } catch {}
     }
 
-    $agCandidates = @(
-        $regCandidates +
+    $agCandidates = @((
+        @($regCandidates) +
         @(
             (Join-Path $env:LOCALAPPDATA "Programs\antigravity\Antigravity.exe"),
             (Join-Path $env:ProgramFiles "Antigravity\Antigravity.exe")
         )
-    ) | Where-Object { $_ -and (Test-Path $_) }
+    ) | Where-Object { $_ -and (Test-Path $_) })
     if ($agCandidates.Count -gt 0) {
         $exe = $agCandidates[0]
         $deskLnkPath = Join-Path $desktop "Antigravity.lnk"
