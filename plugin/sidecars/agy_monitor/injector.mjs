@@ -180,11 +180,11 @@ function installRuntime(ownerTs, codeHash) {
 
   function makeRingSvg(pct) {
     const p = Math.max(0, Math.min(100, Number(pct) || 0));
-    const r = 6.2;
+    const r = 6.9;
     const c = 2 * Math.PI * r;
     const off = c * (1 - p / 100);
     const stroke = contextColor(p);
-    return `<svg class="agm-ring" viewBox="0 0 18 18" style="display:block;width:14px;height:14px;transform:rotate(-90deg);flex-shrink:0"><circle cx="9" cy="9" r="${r}" fill="none" stroke="rgba(142,142,147,0.28)" stroke-width="2.4"/><circle cx="9" cy="9" r="${r}" fill="none" stroke="currentColor" style="stroke:${stroke}" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/></svg>`;
+    return `<svg class="agm-ring" viewBox="0 0 18 18" style="display:block;width:13.5px;height:13.5px;transform:rotate(-90deg);flex-shrink:0"><circle cx="9" cy="9" r="${r}" fill="none" stroke="rgba(142,142,147,0.44)" stroke-width="2.2"/><circle cx="9" cy="9" r="${r}" fill="none" stroke="currentColor" style="stroke:${stroke}" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${off.toFixed(2)}"/></svg>`;
   }
 
   // Ensure shared floating popover container (fixed positioning, never clipped by overflow:hidden)
