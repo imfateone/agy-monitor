@@ -170,7 +170,18 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     assert.equal(res.turns.length, 2);
     assert.equal(res.turns[0].completed, true);
     assert.equal(res.turns[0].hasReply, true);
+    assert.equal(res.turns[0].stepsCount, 6);
+    assert.equal(res.turns[0].modelSec, 8);
+    assert.equal(res.turns[0].toolSec, 6);
+    assert.equal(res.turns[0].avgTtftSec, 1.5);
+    assert.equal(res.turns[0].tps, 62.5);
+    assert.equal('_ttftSum' in res.turns[0], false);
     assert.equal(res.turns[1].completed, true);
+    assert.equal(res.turns[1].stepsCount, 2);
+    assert.equal(res.turns[1].modelSec, 5);
+    assert.equal(res.turns[1].toolSec, 0);
+    assert.equal(res.turns[1].avgTtftSec, 3);
+    assert.equal(res.turns[1].tps, 50);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -338,11 +349,16 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   // Verify runtime bundle JS compiles cleanly inside VM and injects footer/turn DOM properly
   const makeEl = (tag = 'DIV', className = '', attrs = {}) => {
     const children = [];
+    const listeners = {};
     let htmlStr = '';
     const el = {
       tagName: tag.toUpperCase(),
       className,
       style: {},
+      classList: {
+        add(cls) { el.className = Array.from(new Set([...String(el.className || '').split(/\s+/).filter(Boolean), cls])).join(' '); },
+        remove(cls) { el.className = String(el.className || '').split(/\s+/).filter(c => c && c !== cls).join(' '); },
+      },
       dataset: Object.fromEntries(Object.entries(attrs).filter(([k]) => k.startsWith('data-')).map(([k, v]) => [k.slice(5), v])),
       children,
       parentElement: null,
@@ -420,7 +436,8 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
         }
         return null;
       },
-      addEventListener() {},
+      addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+      dispatchEvent(type, ev = { stopPropagation() {} }) { for (const fn of (listeners[type] || [])) fn(ev); },
       attachShadow() {
         el.shadowRoot = makeEl('SHADOW');
         el.shadowRoot.querySelector = (q) => findAll(el.shadowRoot, q)[0] || null;
@@ -533,7 +550,23 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
     session: { turnsCount: 1, stepsCount: 4, modelSec: 4, toolSec: 2, avgTtftSec: 1.2, tps: 120 },
     tokens: { total: 160000, uncached: 1000, cached: 158000, output: 1000, cacheHitPct: 99.4 },
     context: { usedTokens: 159000, maxTokens: 512000, usedPct: 31, categories: [] },
-    turns: [{ turnIndex: 0, completed: true, hasReply: true, total: 160000, cacheHitPct: 99.4, uncached: 1000, cached: 158000, output: 1000, endedAtMs: Date.now() - 60_000, model: 'Gemini 4 Hydrogen' }],
+    turns: [{
+      turnIndex: 0,
+      completed: true,
+      hasReply: true,
+      total: 160000,
+      cacheHitPct: 99.4,
+      uncached: 1000,
+      cached: 158000,
+      output: 1000,
+      stepsCount: 4,
+      modelSec: 4,
+      toolSec: 2,
+      avgTtftSec: 1.2,
+      tps: 120,
+      endedAtMs: Date.now() - 60_000,
+      model: 'Gemini 4 Hydrogen',
+    }],
     prefs: { language: 'zh-CN', enableFooterBar: true, enableTurnPills: true },
   };
   assert.equal(ctx.__agyMonitorDeck.apply(sampleData, '/c/11111111-1111-1111-1111-111111111111', 123456), true);
@@ -553,6 +586,15 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   const turnHost = findAll(d3, '[data-agy-turn-host]')[0];
   assert.ok(turnHost);
   assert.equal(turnHost.shadowRoot.querySelector('[data-v="txt"]').textContent, '用量 160K tok');
+
+  // Click per-turn pill and verify popover card contains both token usage and session-stats rows
+  const turnPillBtn = turnHost.shadowRoot.querySelector('.agm-turn-pill');
+  turnPillBtn.dispatchEvent('click', { stopPropagation() {} });
+  const popCard = byId('agy-monitor-popover-host')?.shadowRoot?.querySelector('.agm-card');
+  assert.ok(popCard && !popCard.hidden);
+  for (const needle of ['本轮步数', '4 步', '模型用时', '4.0 秒', '工具调用用时', '2.0 秒', '首 token 平均（TTFT）', '1.2 秒', '输出速度（TPS）', '120 tok/s']) {
+    assert.ok(popCard.innerHTML.includes(needle), `Missing turn popover text: ${needle}`);
+  }
   assert.ok(footerHost.shadowRoot.querySelector('[data-k="context"]').style.color.includes('hsl(123,'));
   assert.ok(footerHost.shadowRoot.querySelector('[data-v="ring"]').innerHTML.includes('hsl(123,'));
 
@@ -568,6 +610,11 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   const html = renderSidebarHtml();
   assert.ok(html.includes('AGY监控'));
   assert.ok(html.includes('Provider / Model'));
+  assert.ok(html.includes('本轮步数'));
+  assert.ok(html.includes('turn.modelSec'));
+  assert.ok(html.includes('turn.toolSec'));
+  assert.ok(html.includes('turn.avgTtftSec'));
+  assert.ok(html.includes('turn.tps'));
   const scriptBody = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
   assert.ok(scriptBody);
   new vm.Script(scriptBody);

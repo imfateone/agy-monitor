@@ -105,6 +105,8 @@ function installRuntime(ownerTs, codeHash) {
     'zh-CN': {
       sessionTitle: '会话统计',
       turnsSteps: (t, s) => `${t} 轮 ${s} 步`,
+      turnSteps: '本轮步数',
+      stepsUnit: (s) => `${s} 步`,
       modelTime: '模型用时',
       toolTime: '工具调用用时',
       avgTtft: '首 token 平均（TTFT）',
@@ -123,6 +125,8 @@ function installRuntime(ownerTs, codeHash) {
     en: {
       sessionTitle: 'Session Stats',
       turnsSteps: (t, s) => `${t} turns ${s} steps`,
+      turnSteps: 'Steps',
+      stepsUnit: (s) => `${s} steps`,
       modelTime: 'Model time',
       toolTime: 'Tool time',
       avgTtft: 'Avg TTFT',
@@ -172,6 +176,8 @@ function installRuntime(ownerTs, codeHash) {
           position: fixed;
           min-width: 248px;
           max-width: min(320px, calc(100vw - 16px));
+          max-height: calc(100vh - 16px);
+          overflow-y: auto;
           background: var(--card, light-dark(#ffffff, #1e1e22));
           color: var(--foreground, light-dark(#18181b, #f4f4f5));
           border: 1px solid var(--border, light-dark(rgba(0,0,0,0.09), rgba(255,255,255,0.12)));
@@ -239,6 +245,11 @@ function installRuntime(ownerTs, codeHash) {
           height: 7px;
           border-radius: 2px;
           flex-shrink: 0;
+        }
+        .agm-divider {
+          height: 1px;
+          background: var(--border, light-dark(rgba(0,0,0,0.08), rgba(255,255,255,0.10)));
+          margin: 2px 0;
         }
         .agm-ctx-head {
           display: flex;
@@ -415,7 +426,8 @@ function installRuntime(ownerTs, codeHash) {
   }
 
   function buildTurnCardHtml(turn, prefs) {
-    const L = LABELS[prefs?.language === 'en' ? 'en' : 'zh-CN'];
+    const isEn = prefs?.language === 'en';
+    const L = LABELS[isEn ? 'en' : 'zh-CN'];
     return `
       <div class="agm-head">
         <span class="agm-head-left">${SVG_DB}<span>${L.turnTitle}</span></span>
@@ -427,6 +439,12 @@ function installRuntime(ownerTs, codeHash) {
         <div class="agm-row"><span class="agm-row-k">${L.uncachedIn}</span><span class="agm-row-v">${fmtExact(turn.uncached)} tok</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.cachedRead}</span><span class="agm-row-v">${fmtExact(turn.cached)} tok</span></div>
         <div class="agm-row"><span class="agm-row-k">${L.output}</span><span class="agm-row-v">${fmtExact(turn.output)} tok</span></div>
+        <div class="agm-divider"></div>
+        <div class="agm-row"><span class="agm-row-k">${L.turnSteps}</span><span class="agm-row-v">${esc(L.stepsUnit(turn.stepsCount || 0))}</span></div>
+        <div class="agm-row"><span class="agm-row-k">${L.modelTime}</span><span class="agm-row-v">${esc(fmtDur(turn.modelSec || 0, isEn))}</span></div>
+        <div class="agm-row"><span class="agm-row-k">${L.toolTime}</span><span class="agm-row-v">${esc(fmtDur(turn.toolSec || 0, isEn))}</span></div>
+        <div class="agm-row"><span class="agm-row-k">${L.avgTtft}</span><span class="agm-row-v">${esc(turn.avgTtftSec != null ? fmtDur(turn.avgTtftSec, isEn) : '—')}</span></div>
+        <div class="agm-row"><span class="agm-row-k">${L.outputTps}</span><span class="agm-row-v">${esc(fmtTps(turn.tps))}</span></div>
       </div>`;
   }
 

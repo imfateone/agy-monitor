@@ -337,7 +337,7 @@ export function buildConversationTelemetry(dbPath) {
     }
   }
 
-  // Per-turn usage aggregation
+  // Per-turn usage & session-stats aggregation
   const turns = userSteps.map((u, i) => {
     const startIdx = u.idx;
     const endIdx = i + 1 < userSteps.length ? userSteps[i + 1].idx - 1 : Infinity;
@@ -347,6 +347,13 @@ export function buildConversationTelemetry(dbPath) {
     const hasExecutorDone = executors.some(ex => ex.lastStepIndex >= startIdx && ex.lastStepIndex <= endIdx && ![0, 7, 12].includes(ex.reason));
     const completed = !hasActive && (plannerDoneSteps.length > 0 || hasExecutorDone);
     const lastEnded = turnSteps.map(s => s.endedAtMs).filter(Boolean);
+    const turnToolIntervals = [];
+    for (const s of turnSteps) {
+      if (NON_TOOL_STEPS.has(s.stepType)) continue;
+      if (s.createdAtMs && s.endedAtMs && s.endedAtMs >= s.createdAtMs) {
+        turnToolIntervals.push([s.createdAtMs, s.endedAtMs]);
+      }
+    }
 
     return {
       turnIndex: i,
@@ -360,6 +367,15 @@ export function buildConversationTelemetry(dbPath) {
       total: 0,
       cacheHitPct: null,
       reqCount: 0,
+      stepsCount: turnSteps.length,
+      modelSec: 0,
+      toolSec: mergeIntervalsSec(turnToolIntervals),
+      avgTtftSec: null,
+      tps: null,
+      _ttftSum: 0,
+      _ttftCount: 0,
+      _timedOutput: 0,
+      _timedModelSec: 0,
       model: '',
       modelId: '',
       endedAtMs: lastEnded.length ? Math.max(...lastEnded) : null,
@@ -374,6 +390,20 @@ export function buildConversationTelemetry(dbPath) {
     turn.cached += g.cached;
     turn.output += g.output;
     turn.reqCount++;
+    if (g.ttft !== null && g.ttft >= 0) {
+      turn._ttftSum += g.ttft;
+      turn._ttftCount++;
+    }
+    if (g.ttft !== null && g.streaming !== null) {
+      const dur = g.ttft + g.streaming;
+      if (dur >= 0) {
+        turn.modelSec += dur;
+        if (g.latestOutput > 0 && dur > 0) {
+          turn._timedOutput += g.latestOutput;
+          turn._timedModelSec += dur;
+        }
+      }
+    }
     if (g.model) turn.model = g.model;
     if (g.modelId) turn.modelId = g.modelId;
   }
@@ -382,6 +412,8 @@ export function buildConversationTelemetry(dbPath) {
     t.total = t.uncached + t.cached + t.output;
     const promptIn = t.uncached + t.cached;
     t.cacheHitPct = promptIn > 0 ? (t.cached / promptIn) * 100 : null;
+    t.avgTtftSec = t._ttftCount > 0 ? t._ttftSum / t._ttftCount : null;
+    t.tps = t._timedModelSec > 0 ? t._timedOutput / t._timedModelSec : null;
     if (!t.model) t.model = latestModel || latestModelId;
     if (!t.modelId) t.modelId = latestModelId;
   }
@@ -413,7 +445,7 @@ export function buildConversationTelemetry(dbPath) {
       categories: contextCategories,
       breakdownTotal: latestBreakdown?.total || usedTokens,
     },
-    turns: turns.map(({ endStepIndex, ...rest }) => rest),
+    turns: turns.map(({ endStepIndex, _ttftSum, _ttftCount, _timedOutput, _timedModelSec, ...rest }) => rest),
   };
 }
 

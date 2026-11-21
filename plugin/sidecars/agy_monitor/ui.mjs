@@ -66,6 +66,7 @@ export function renderSidebarHtml() {
     .row-k { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-foreground, light-dark(#71717a, #a1a1aa)); }
     .row-v { font-weight: 500; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; }
     .dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+    .divider { height: 1px; background: var(--border, light-dark(rgba(0,0,0,0.07), rgba(255,255,255,0.08))); margin: 2px 0; }
     .bar {
       width: 100%; height: 5px; border-radius: 999px;
       background: light-dark(rgba(0,0,0,0.08), rgba(255,255,255,0.12));
@@ -121,7 +122,7 @@ export function renderSidebarHtml() {
         ctxTitle: '上下文已用', quotaTitle: '模型配额', cdpOk: '页面胶囊已挂载', cdpOff: '未连上页面调试端口（仅侧栏可用）',
         cdpHint: 'Antigravity 2.33+ 默认关闭调试端口：请在启动快捷方式「目标」末尾加上 --remote-debugging-port=0，完全退出后重开即可恢复底部条和每轮胶囊。',
         matchedFooters: (n) => '本页已挂载回复条：' + n + ' 条',
-        turnHeader: (i) => '第 ' + (i + 1) + ' 轮', modelLabel: '提供方 / 模型', emptyTurns: '当前会话暂无已完成轮次',
+        turnHeader: (i) => '第 ' + (i + 1) + ' 轮', turnSteps: '本轮步数', stepsUnit: (s) => s + ' 步', modelLabel: '提供方 / 模型', emptyTurns: '当前会话暂无已完成轮次',
         optFooter: '底部监控栏三胶囊', optFooterDesc: '在聊天框下方单独一行显示 会话统计 / Token 用量 / 上下文圆环',
         optTurn: '每轮结束底部用量胶囊', optTurnDesc: '在每条 AI 回复操作栏旁显示 用量 XXX tok',
         optQuota: '在侧栏显示模型配额', optLang: '显示语言',
@@ -134,7 +135,7 @@ export function renderSidebarHtml() {
         ctxTitle: 'Context used', quotaTitle: 'Model Quotas', cdpOk: 'In-page pills active', cdpOff: 'Debugging port unavailable (sidebar only)',
         cdpHint: 'Antigravity 2.33+ disables the debugging port by default. Append --remote-debugging-port=0 to your shortcut Target and restart Antigravity completely to restore in-page pills.',
         matchedFooters: (n) => 'Matched turn footers: ' + n,
-        turnHeader: (i) => 'Turn #' + (i + 1), modelLabel: 'Provider / Model', emptyTurns: 'No completed turns yet',
+        turnHeader: (i) => 'Turn #' + (i + 1), turnSteps: 'Steps', stepsUnit: (s) => s + ' steps', modelLabel: 'Provider / Model', emptyTurns: 'No completed turns yet',
         optFooter: 'Composer footer 3-pill strip', optFooterDesc: 'Show Session / Token Usage / Context ring below input box',
         optTurn: 'Per-turn completion pill', optTurnDesc: 'Show token pill beside each assistant reply footer',
         optQuota: 'Show model quotas in sidebar', optLang: 'Language',
@@ -218,6 +219,12 @@ export function renderSidebarHtml() {
           + '<div class="row"><span class="row-k">' + L.uncachedIn + '</span><span class="row-v">' + fmtExact(turn.uncached) + ' tok</span></div>'
           + '<div class="row"><span class="row-k">' + L.cachedRead + '</span><span class="row-v">' + fmtExact(turn.cached) + ' tok</span></div>'
           + '<div class="row"><span class="row-k">' + L.output + '</span><span class="row-v">' + fmtExact(turn.output) + ' tok</span></div>'
+          + '<div class="divider"></div>'
+          + '<div class="row"><span class="row-k">' + L.turnSteps + '</span><span class="row-v">' + esc(L.stepsUnit(turn.stepsCount || 0)) + '</span></div>'
+          + '<div class="row"><span class="row-k">' + L.modelTime + '</span><span class="row-v">' + esc(fmtDur(turn.modelSec || 0, isEn)) + '</span></div>'
+          + '<div class="row"><span class="row-k">' + L.toolTime + '</span><span class="row-v">' + esc(fmtDur(turn.toolSec || 0, isEn)) + '</span></div>'
+          + '<div class="row"><span class="row-k">' + L.avgTtft + '</span><span class="row-v">' + esc(turn.avgTtftSec != null ? fmtDur(turn.avgTtftSec, isEn) : '—') + '</span></div>'
+          + '<div class="row"><span class="row-k">' + L.outputTps + '</span><span class="row-v">' + esc(fmtTps(turn.tps)) + '</span></div>'
           + '</div></div>').join('') + '</div>';
 
       if (currentTab !== 'settings' || !document.getElementById('view-settings').innerHTML) {
