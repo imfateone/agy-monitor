@@ -1,6 +1,6 @@
 # AGY监控
 
-Antigravity 会话统计、分模型缓存命中分析、上下文占用拆解、每轮用量胶囊与额度监控插件。
+Antigravity 会话统计、分模型缓存命中分析、上下文占用拆解、每轮用量胶囊、历史 Token 用量统计与额度监控插件。
 
 ---
 
@@ -20,9 +20,16 @@ Antigravity 会话统计、分模型缓存命中分析、上下文占用拆解�
   - 记录并展示会话及单轮触发上下文压缩的次数，精确拆分当前上下文窗口与历史压缩分段。
 - **上下文窗口构成拆解**
   - 通过彩色分段进度条直观展示当前上下文窗口中 **对话消息、工具定义、系统提示词、Skills、Mcp Tools** 等类别的占用体积。
+- **历史 Token 用量统计（用量统计 Tab）**
+  - 支持 **本日 / 本周 / 本月 / 全部** 四档时间切换，提供 **5 级纯色月历**、年度热力图、柱状图与日期/小时下钻交互；
+  - 自动避免主/子会话重复计入，统计缓存命中率、思考/正文输出占比、等效费用与缓存节省估算，并按模型独立汇总调用次数、TTFT 与 TPS；
+  - 历史数据库扫描与缓存持久化运行在独立 **Worker 线程** 中，使用单读事务 SQLite WAL 快照与本地时区感知缓存，不阻塞实时遥测接口与页面心跳。
 - **右侧「AGY监控」侧边栏与个性化设置**
-  - 内置「统计总览 / 每轮明细 / 设置」三大视图与模型配额池监控；
-  - 支持独立开关底部监控栏、每轮用量胶囊、侧边栏配额展示，支持 **简体中文 / English** 一键切换。
+  - 内置 **「统计总览 / 每轮明细 / 用量统计 / 设置」四大视图**与模型配额池监控；
+  - 支持独立开关底部监控栏、每轮用量胶囊、侧边栏配额与费用估算展示，支持 **简体中文 / English** 一键切换，并自适应宿主的深/浅色主题。
+- **低开销常驻与稳定性**
+  - 实时会话快照采用单遍线性扫表与二分定位，注入器将观察范围收敛至聊天容器并在排序前缓存布局坐标，同时对连续超时的 CDP 连接做退避回收；
+  - 侧边栏采用 `AbortController` 超时控制、请求单飞锁、页面隐藏自动暂停轮询及零重排悬浮 Tooltip。
 
 ---
 
@@ -40,9 +47,9 @@ Antigravity 会话统计、分模型缓存命中分析、上下文占用拆解�
 
 ### 右侧「AGY监控」侧边栏
 
-| 统计总览 · 汇总 | 统计总览 · 分模型 | 每轮明细 |
-| :---: | :---: | :---: |
-| ![侧边栏统计总览](docs/images/sidebar-overview.png) | ![侧边栏分模型明细](docs/images/sidebar-models.png) | ![侧边栏每轮明细](docs/images/sidebar-turns.png) |
+| 统计总览 · 汇总 | 统计总览 · 分模型 | 每轮明细 | 用量统计 |
+| :---: | :---: | :---: | :---: |
+| ![侧边栏统计总览](docs/images/sidebar-overview.png) | ![侧边栏分模型明细](docs/images/sidebar-models.png) | ![侧边栏每轮明细](docs/images/sidebar-turns.png) | ![侧边栏用量统计](docs/images/sidebar-usage.png) |
 
 ---
 
@@ -76,3 +83,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
   ```
 - **实时插件目录（仅本地）**：`%USERPROFILE%\.gemini\config\plugins\agy-monitor`
 - **插件设置文件（仅本地）**：`%USERPROFILE%\.gemini\config\plugins\agy-monitor\settings.json`
+- **历史用量缓存文件（仅本地）**：`%USERPROFILE%\.gemini\config\agy-monitor\usage-stats-cache.json`
