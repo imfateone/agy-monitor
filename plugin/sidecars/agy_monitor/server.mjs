@@ -8,10 +8,12 @@ import { startSelfReloadWatcher } from './reload.mjs';
 import { createSettingsStore } from './settings.mjs';
 import { buildConversationTelemetry, createSnapshotCache, resolveLatestConversationId } from './telemetry.mjs';
 import { renderSidebarHtml } from './ui.mjs';
+import { createAsyncUsageStatsCollector } from './usage_stats.mjs';
 
 const CONV_DIR = join(homedir(), '.gemini', 'antigravity', 'conversations');
 const settingsStore = createSettingsStore();
 const snapshotCache = createSnapshotCache(buildConversationTelemetry);
+const usageStatsCollector = createAsyncUsageStatsCollector({ convDir: CONV_DIR });
 
 let cachedQuota = { quotaGroups: [], cloudPaygo: false };
 let lastQuotaAt = 0;
@@ -144,6 +146,10 @@ if (isMain && process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {
     ...await getTelemetry(data?.conversationId || app.config.conversationId, false),
     cdp: injector?.status?.() || { cdpState: 'unknown', matchedTurnFooters: 0 },
   }), 'GET');
+  app.api('/api/usage-stats', async (data) => ({
+    ...await usageStatsCollector.readStats({ forceRefresh: Boolean(data?.force === '1' || data?.force === true) }),
+    prefs: settingsStore.read(),
+  }), 'GET');
   app.api('/api/settings', () => settingsStore.read(), 'GET');
   app.api('/api/settings', (data) => settingsStore.update(data), 'POST');
   app.run();
@@ -157,7 +163,7 @@ if (isMain && (process.env.ANTIGRAVITY_LS_ADDRESS || process.env.ANTIGRAVITY_SID
     stopping = true;
     stopWatch();
     console.log('[agy-monitor] stopping:', reason);
-    try { await injector.stop(); }
+    try { await Promise.allSettled([injector.stop(), usageStatsCollector.close()]); }
     finally { process.exit(0); }
   };
   const stopWatch = startSelfReloadWatcher(dirname(fileURLToPath(import.meta.url)), () => void shutdown('files changed'));

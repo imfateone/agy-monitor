@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fmtCompact, fmtDur, fmtExact, fmtPct, fmtTps, esc } from '../sidecars/agy_monitor/pb.mjs';
@@ -11,6 +11,7 @@ import { normalizeSettings, createSettingsStore } from '../sidecars/agy_monitor/
 import { buildRuntimeBundle, matchTurnBarsToCompleted, parseRelativeAgeMs } from '../sidecars/agy_monitor/injector.mjs';
 import { renderSidebarHtml } from '../sidecars/agy_monitor/ui.mjs';
 import { createTelemetryController, EMPTY_DATA } from '../sidecars/agy_monitor/server.mjs';
+import { assignModelColors, createAsyncUsageStatsCollector, createUsageStatsCollector, estimateModelCost, formatLocalYmd } from '../sidecars/agy_monitor/usage_stats.mjs';
 
 function varint(n) {
   const bytes = [];
@@ -36,17 +37,18 @@ function tsPb(sec, nano = 0) {
   return Buffer.concat([fieldVarint(1, sec), fieldVarint(2, nano)]);
 }
 
-function makeUsage({ uncached = 0, cached = 0, out = 0 } = {}) {
+function makeUsage({ uncached = 0, cached = 0, out = 0, think = 0 } = {}) {
   return Buffer.concat([
     fieldVarint(2, uncached),
     fieldVarint(5, cached),
     fieldVarint(3, out),
-    fieldVarint(10, out),
+    ...(think > 0 ? [fieldVarint(9, think)] : []),
+    fieldVarint(10, Math.max(0, out - think)),
   ]);
 }
 
-function makeGen({ stepIdxs, uncached, cached, out, ttftSec, streamSec, model, modelId, breakdown, retries }) {
-  const usage = makeUsage({ uncached, cached, out });
+function makeGen({ stepIdxs, uncached, cached, out, think = 0, ttftSec, streamSec, model, modelId, breakdown, retries }) {
+  const usage = makeUsage({ uncached, cached, out, think });
   const m10Parts = [fieldVarint(1, uncached + cached), fieldVarint(4, 512000)];
   if (breakdown) {
     const items = breakdown.map(([id, label, tok]) =>
@@ -189,7 +191,7 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     assert.equal(res.turns[1].avgTtftSec, 3);
     assert.equal(res.turns[1].tps, 50);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -399,7 +401,7 @@ test('buildConversationTelemetry aggregates multi-model turns, nested/compaction
     assert.equal(snap2.session.isStreaming, false);
     assert.equal(snap2.turns[1].completed, true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -477,7 +479,7 @@ test('createSnapshotCache invalidates cleanly on SQLite WAL writes', () => {
     assert.equal(cache.read(dbPath), 2);
     db.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -514,7 +516,7 @@ test('createTelemetryController isolates multi-window and empty home tabs from s
     const sidebarExplicit = await controller(convB, false);
     assert.equal(sidebarExplicit.session.model, 'ModelB');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -554,7 +556,7 @@ test('settings store validates and persists patches', () => {
     assert.equal('bogus' in updated, false);
     assert.equal(normalizeSettings({ language: 'fr' }).language, 'zh-CN');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -965,6 +967,10 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   // Verify sidebar HTML + embedded JS script compiles cleanly with zero syntax errors
   const html = renderSidebarHtml();
   assert.ok(html.includes('AGY监控'));
+  assert.ok(html.includes('data-tab="usage"'));
+  assert.ok(html.includes('/api/usage-stats'));
+  assert.ok(html.includes('showCostEstimate'));
+  assert.ok(html.includes('u-heat-4'));
   assert.ok(html.includes('Provider / Model'));
   assert.ok(html.includes('分模型'));
   assert.ok(html.includes('lastConvId'));
@@ -986,4 +992,175 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   ctx.__agyMonitorDeck.dispose();
   assert.equal(byId('agy-monitor-layout-style'), null);
   assert.equal(outer.hasAttribute('data-agy-pad'), false);
+});
+
+test('createUsageStatsCollector splits days cleanly, avoids subagent double counting, computes cost/colors, and invalidates WAL cache', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-usage-test-'));
+  try {
+    const convDir = join(dir, 'convs');
+    mkdirSync(convDir, { recursive: true });
+    const cacheFile = join(dir, 'usage-cache.json');
+    const stepMeta = (sec) => fieldBytes(1, tsPb(sec));
+    const invokePayload = (id) => fieldBytes(140, fieldBytes(2, fieldBytes(3, fieldBytes(9, fieldBytes(5, fieldBytes(1, id))))));
+    const nowDt = new Date();
+    nowDt.setHours(10, 15, 0, 0);
+    const todayMs = nowDt.getTime();
+    const todaySec = Math.floor(todayMs / 1000);
+    const yestSec = todaySec - 86400;
+    const todayYmd = formatLocalYmd(todayMs);
+    const yestYmd = formatLocalYmd(yestSec * 1000);
+
+    const makeDb = (path) => {
+      const db = new DatabaseSync(path);
+      db.exec(`
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB);
+        CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+      `);
+      return db;
+    };
+
+    const childId = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+    const mainPath = join(convDir, 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb.db');
+    const childPath = join(convDir, `${childId}.db`);
+
+    const cDb = makeDb(childPath);
+    cDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(todaySec), null);
+    cDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [0], uncached: 1000, cached: 4000, out: 500, think: 200, ttftSec: 1, streamSec: 2,
+      model: 'Gemini 4 Flash', modelId: 'gemini-4-flash',
+    }));
+    cDb.close();
+
+    const mDb = makeDb(mainPath);
+    // Yesterday step + invoke_subagent step referencing childId + today step at hour 10
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(yestSec), null);
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 132, 3, stepMeta(todaySec), invokePayload(childId));
+    mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(2, 15, 3, stepMeta(todaySec), null);
+    mDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [0], uncached: 2000, cached: 8000, out: 1000, think: 600, ttftSec: 2, streamSec: 2,
+      model: 'Claude Opus 4.6', modelId: 'claude-opus-4-6',
+    }));
+    mDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(1, makeGen({
+      stepIdxs: [2], uncached: 3000, cached: 7000, out: 800, think: 300, ttftSec: 1, streamSec: 3,
+      model: 'Claude Opus 4.6', modelId: 'claude-opus-4-6',
+    }));
+    mDb.close();
+
+    const collector = createUsageStatsCollector({ convDir, cacheFile });
+    const s1 = collector.readStats({ nowMs: todayMs });
+    assert.equal(s1.todayYmd, todayYmd);
+    assert.equal(s1.dbCount, 2);
+    // Yesterday has only main gen 0 (Claude Opus: 2000+8000+1000 = 11000)
+    assert.equal(s1.days[yestYmd].total, 11000);
+    assert.equal(s1.days[yestYmd].thinking, 600);
+    assert.equal(s1.days[yestYmd].reply, 400);
+    // Today has main gen 1 (10800) + child gen 0 (5500) = 16300, counted ONCE (no double counting!)
+    assert.equal(s1.days[todayYmd].total, 16300);
+    assert.equal(s1.days[todayYmd].thinking, 500);
+    assert.equal(s1.days[todayYmd].reply, 800);
+    assert.equal(s1.days[todayYmd].reqs, 2);
+    assert.equal(s1.todayHours[10].total, 16300);
+    assert.equal(s1.todayHours[11].total, 0);
+
+    // Persisted disk cache test with fresh collector instance
+    const persisted = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    assert.equal(Object.keys(persisted.files).length, 2);
+
+    // Modify child WAL (keep open to keep -wal file non-empty) and verify WAL invalidation
+    const cDb2 = new DatabaseSync(childPath);
+    cDb2.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 15, 3, stepMeta(todaySec + 3600), null);
+    cDb2.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(1, makeGen({
+      stepIdxs: [1], uncached: 500, cached: 1500, out: 200, think: 50, ttftSec: 1, streamSec: 1,
+      model: 'Gemini 4 Flash', modelId: 'gemini-4-flash',
+    }));
+    const s2 = createUsageStatsCollector({ convDir, cacheFile }).readStats({ nowMs: todayMs });
+    assert.equal(s2.days[todayYmd].total, 18500);
+    assert.equal(s2.todayHours[11].total, 2200);
+    cDb2.close();
+
+    // Cost estimation & collision-free model-family colors
+    const opusCost = estimateModelCost('Claude Opus 4.6', 1_000_000, 1_000_000, 100_000);
+    assert.ok(Math.abs(opusCost.actualUsd - 8.0) < 1e-6); // 5.0 + 0.5 + 2.5
+    assert.ok(Math.abs(opusCost.savedUsd - 4.5) < 1e-6); // (1M * (5.0 - 0.5))
+    const colors = assignModelColors([
+      { name: 'Claude Opus 4.6', total: 500 },
+      { name: 'Claude Opus 4.5', total: 300 },
+      { name: 'Gemini 4 Hydrogen', total: 400 },
+      { name: 'Gemini 3.8 Flash', total: 200 },
+      { name: 'GPT-5.3 Codex', total: 250 },
+    ]);
+    assert.equal(new Set(Object.values(colors)).size, 5);
+    assert.equal(colors['Claude Opus 4.6'], '#d97757');
+    assert.equal(colors['GPT-5.3 Codex'], '#10b981');
+
+    // Timezone signature change invalidates usage cache and re-buckets cleanly
+    const rawCache = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    assert.ok(typeof rawCache.tz === 'string' && rawCache.tz.length > 0);
+    rawCache.tz = 'off=9999|tz=FakeZone|iana=FakeZone';
+    writeFileSync(cacheFile, JSON.stringify(rawCache), 'utf8');
+    const sTz = createUsageStatsCollector({ convDir, cacheFile }).readStats({ nowMs: todayMs });
+    assert.equal(sTz.days[todayYmd].total, 18500);
+    const updatedRawCache = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    assert.notEqual(updatedRawCache.tz, 'off=9999|tz=FakeZone|iana=FakeZone');
+
+    // Async worker collector returns identical stats, coalesces calls, and closes cleanly
+    const asyncCollector = createAsyncUsageStatsCollector({ convDir, cacheFile });
+    try {
+      const [a1, a2] = await Promise.all([
+        asyncCollector.readStats({ nowMs: todayMs }),
+        asyncCollector.readStats({ nowMs: todayMs }),
+      ]);
+      assert.equal(a1.days[todayYmd].total, 18500);
+      assert.equal(a2.days[todayYmd].total, 18500);
+    } finally {
+      await asyncCollector.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('buildConversationTelemetry handles 200-turn 1200-step session accurately in linear time', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-large-conv-'));
+  let db = null;
+  try {
+    const dbPath = join(dir, 'large.db');
+    db = new DatabaseSync(dbPath);
+    db.exec(`
+      PRAGMA journal_mode=WAL;
+      CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB);
+      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);
+      BEGIN;
+    `);
+    const insStep = db.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)');
+    const insGen = db.prepare('INSERT INTO gen_metadata VALUES (?, ?)');
+    const baseSec = 1_760_000_000;
+    let genIdx = 0;
+    for (let t = 0; t < 200; t++) {
+      const sBase = t * 6;
+      insStep.run(sBase, 14, 3, fieldBytes(1, tsPb(baseSec + t * 10)), null);
+      insStep.run(sBase + 1, 5, 3, fieldBytes(1, tsPb(baseSec + t * 10 + 1)), null);
+      insStep.run(sBase + 2, 5, 3, fieldBytes(1, tsPb(baseSec + t * 10 + 2)), null);
+      insStep.run(sBase + 3, 5, 3, fieldBytes(1, tsPb(baseSec + t * 10 + 3)), null);
+      insStep.run(sBase + 4, 5, 3, fieldBytes(1, tsPb(baseSec + t * 10 + 4)), null);
+      insStep.run(sBase + 5, 15, 3, fieldBytes(1, tsPb(baseSec + t * 10 + 5)), null);
+      insGen.run(genIdx++, makeGen({ stepIdxs: [sBase + 5], uncached: 100, cached: 400, out: 50, think: 10, ttftSec: 1, streamSec: 1, model: 'Gemini 4 Flash', modelId: 'gemini-4-flash' }));
+    }
+    db.exec('COMMIT; PRAGMA wal_checkpoint(TRUNCATE);');
+    db.close();
+    db = null;
+
+    const snap = buildConversationTelemetry(dbPath);
+    assert.equal(snap.session.turnsCount, 200);
+    assert.equal(snap.session.stepsCount, 1200);
+    assert.equal(snap.turns.length, 200);
+    assert.equal(snap.tokens.total, 200 * 550);
+    assert.equal(snap.turns[0].total, 550);
+    assert.equal(snap.turns[199].total, 550);
+    assert.equal(snap.turns[199].completed, true);
+  } finally {
+    try { db?.close(); } catch {}
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 });

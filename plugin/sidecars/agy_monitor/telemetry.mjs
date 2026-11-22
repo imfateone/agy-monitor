@@ -35,7 +35,7 @@ function fileStamp(path) {
   }
 }
 
-function stampDb(path) {
+export function stampDb(path) {
   const db = fileStamp(path);
   if (!db || db.size === 0n) return null;
   const wal = fileStamp(`${path}-wal`);
@@ -378,75 +378,103 @@ function extractCompactionSubagentRefs(payloadBuf, selfIds) {
   return refs;
 }
 
+function findLastIndexLE(arr, keyFn, target) {
+  let lo = 0;
+  let hi = arr.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (keyFn(arr[mid]) <= target) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
 function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {}) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   let genRows = [];
   let stepRows = [];
   let execRows = [];
+  let trajRows = [];
   let payloadRows = [];
   const selfIds = new Set([basename(dbPath, '.db')]);
-  const hasPayloadSubMap = [];
-  let parsedSteps = [];
   try {
-    genRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
-    stepRows = db.prepare('SELECT idx, step_type, status, metadata FROM steps ORDER BY idx ASC').all();
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='executor_metadata'").get()) {
-      execRows = db.prepare('SELECT idx, data FROM executor_metadata ORDER BY idx ASC').all();
-    }
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trajectory_meta'").get()) {
-      for (const tm of db.prepare('SELECT trajectory_id, cascade_id FROM trajectory_meta').all()) {
-        if (tm.trajectory_id) selfIds.add(String(tm.trajectory_id));
-        if (tm.cascade_id) selfIds.add(String(tm.cascade_id));
+    let inTx = false;
+    try {
+      db.exec('BEGIN DEFERRED');
+      inTx = true;
+      genRows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
+      stepRows = db.prepare('SELECT idx, step_type, status, metadata FROM steps ORDER BY idx ASC').all();
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='executor_metadata'").get()) {
+        execRows = db.prepare('SELECT idx, data FROM executor_metadata ORDER BY idx ASC').all();
       }
-    }
-    for (const id of selfIds) visited?.add(id);
-
-    const hasStepPayload = db.prepare('PRAGMA table_info(steps)').all().some(c => c.name === 'step_payload');
-    const subagentStepIdxs = [];
-    let latestCompactionIdx = -1;
-
-    parsedSteps = stepRows.map(s => {
-      const f = parsePbMap(Buffer.from(s.metadata || []));
-      const createdAtMs = parseTimestampMs(f.get(1)?.[0]);
-      const completedAtMs = parseTimestampMs(f.get(8)?.[0]) || parseTimestampMs(f.get(7)?.[0]);
-      const transitions = (parsePbMap(f.get(26)?.[0] || Buffer.alloc(0)).get(1) || []).map(parsePbMap);
-      const terminalMs = transitions
-        .filter(t => [3, 6, 7, 12].includes(t.get(1)?.[0]))
-        .map(t => parseTimestampMs(t.get(2)?.[0]))
-        .filter(Boolean);
-      const endedAtMs = completedAtMs || (terminalMs.length ? Math.max(...terminalMs) : null);
-      const toolName = s.step_type === 132 ? extractToolName(f) : '';
-      if (SUBAGENT_TOOLS.has(toolName)) {
-        subagentStepIdxs.push(s.idx);
-      } else if (s.step_type === 23 && (s.status === 3 || s.status === 5)) {
-        latestCompactionIdx = s.idx;
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trajectory_meta'").get()) {
+        trajRows = db.prepare('SELECT trajectory_id, cascade_id FROM trajectory_meta').all();
       }
-      return {
-        idx: s.idx,
-        stepType: s.step_type,
-        status: s.status,
-        createdAtMs,
-        endedAtMs,
-        toolName,
-      };
-    });
-
-    if (hasStepPayload) {
-      const targetIdxs = [...subagentStepIdxs];
-      if (latestCompactionIdx >= 0) targetIdxs.push(latestCompactionIdx);
-      if (targetIdxs.length > 0) {
-        const placeholders = targetIdxs.map(() => '?').join(',');
-        payloadRows = db
-          .prepare(`SELECT idx, step_type, step_payload FROM steps WHERE idx IN (${placeholders})`)
-          .all(...targetIdxs);
-        for (const r of payloadRows) {
-          hasPayloadSubMap.push(r);
+      const hasStepPayload = db.prepare('PRAGMA table_info(steps)').all().some(c => c.name === 'step_payload');
+      if (hasStepPayload) {
+        const subagentStepIdxs = [];
+        let latestCompactionIdx = -1;
+        for (const s of stepRows) {
+          if (s.step_type === 132) {
+            const toolName = extractToolName(parsePbMap(Buffer.from(s.metadata || [])));
+            if (SUBAGENT_TOOLS.has(toolName)) subagentStepIdxs.push(s.idx);
+          } else if (s.step_type === 23 && (s.status === 3 || s.status === 5)) {
+            latestCompactionIdx = s.idx;
+          }
+        }
+        const targetIdxs = [...subagentStepIdxs];
+        if (latestCompactionIdx >= 0) targetIdxs.push(latestCompactionIdx);
+        if (targetIdxs.length > 0) {
+          const placeholders = targetIdxs.map(() => '?').join(',');
+          payloadRows = db
+            .prepare(`SELECT idx, step_type, step_payload FROM steps WHERE idx IN (${placeholders})`)
+            .all(...targetIdxs);
         }
       }
+      db.exec('COMMIT');
+      inTx = false;
+    } catch (err) {
+      if (inTx) {
+        try { db.exec('ROLLBACK'); } catch {}
+      }
+      throw err;
     }
   } finally {
     db.close();
   }
+
+  for (const tm of trajRows) {
+    if (tm.trajectory_id) selfIds.add(String(tm.trajectory_id));
+    if (tm.cascade_id) selfIds.add(String(tm.cascade_id));
+  }
+  for (const id of selfIds) visited?.add(id);
+
+  const hasPayloadSubMap = payloadRows;
+  const parsedSteps = stepRows.map(s => {
+    const f = parsePbMap(Buffer.from(s.metadata || []));
+    const createdAtMs = parseTimestampMs(f.get(1)?.[0]);
+    const completedAtMs = parseTimestampMs(f.get(8)?.[0]) || parseTimestampMs(f.get(7)?.[0]);
+    const transitions = (parsePbMap(f.get(26)?.[0] || Buffer.alloc(0)).get(1) || []).map(parsePbMap);
+    const terminalMs = transitions
+      .filter(t => [3, 6, 7, 12].includes(t.get(1)?.[0]))
+      .map(t => parseTimestampMs(t.get(2)?.[0]))
+      .filter(Boolean);
+    const endedAtMs = completedAtMs || (terminalMs.length ? Math.max(...terminalMs) : null);
+    const toolName = s.step_type === 132 ? extractToolName(f) : '';
+    return {
+      idx: s.idx,
+      stepType: s.step_type,
+      status: s.status,
+      createdAtMs,
+      endedAtMs,
+      toolName,
+    };
+  });
 
   const refMap = new Map();
   for (const r of hasPayloadSubMap) {
@@ -523,7 +551,8 @@ function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {})
     if (g.maxContextTokens > 0) latestMaxContext = g.maxContextTokens;
 
     const refIdx = g.stepIndices.length ? Math.max(...g.stepIndices) : g.lastStepIndex;
-    const crossedCheckpoint = checkpointIdxs.findLast(cp => cp > lastCheckpointIdx && cp <= refIdx);
+    const cpIdx = findLastIndexLE(checkpointIdxs, x => x, refIdx);
+    const crossedCheckpoint = (cpIdx >= 0 && checkpointIdxs[cpIdx] > lastCheckpointIdx) ? checkpointIdxs[cpIdx] : undefined;
     const contextDropped = g.contextTokens > 0 && prevContextTokens > 0 && g.contextTokens < prevContextTokens * 0.7;
     if (crossedCheckpoint !== undefined || contextDropped) {
       if (crossedCheckpoint !== undefined) lastCheckpointIdx = crossedCheckpoint;
@@ -549,37 +578,58 @@ function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {})
 
   let turns = [];
   if (includeTurns) {
+    const completedExecIdxs = executors
+      .filter(ex => ex.lastStepIndex >= 0 && ![0, 7, 12].includes(ex.reason))
+      .map(ex => ex.lastStepIndex)
+      .sort((a, b) => a - b);
+
+    let stepPtr = 0;
+    let execPtr = 0;
     turns = userSteps.map((u, i) => {
       const startIdx = u.idx;
       const endIdx = i + 1 < userSteps.length ? userSteps[i + 1].idx - 1 : Infinity;
-      const turnSteps = parsedSteps.filter(s => s.idx >= startIdx && s.idx <= endIdx);
-      const hasActive = turnSteps.some(s => s.stepType !== 14 && ACTIVE_STATUSES.has(s.status));
-      const plannerDoneSteps = turnSteps.filter(s => s.stepType === 15 && (s.status === 3 || s.status === 5));
-      const hasExecutorDone = executors.some(ex => ex.lastStepIndex >= startIdx && ex.lastStepIndex <= endIdx && ![0, 7, 12].includes(ex.reason));
-      const completed = !hasActive && (plannerDoneSteps.length > 0 || hasExecutorDone);
-      const lastEnded = turnSteps.map(s => s.endedAtMs).filter(Boolean);
+      while (stepPtr < parsedSteps.length && parsedSteps[stepPtr].idx < startIdx) stepPtr++;
+      while (execPtr < completedExecIdxs.length && completedExecIdxs[execPtr] < startIdx) execPtr++;
+
+      let turnStepsCount = 0;
+      let hasActive = false;
+      let hasPlannerDone = false;
+      let hasExecutorDone = false;
+      let turnCompactions = 0;
+      let maxEndedAtMs = 0;
       const turnToolIntervals = [];
-      for (const s of turnSteps) {
-        if (NON_TOOL_STEPS.has(s.stepType)) continue;
-        if (s.createdAtMs && s.endedAtMs && s.endedAtMs >= s.createdAtMs) {
+
+      while (stepPtr < parsedSteps.length && parsedSteps[stepPtr].idx <= endIdx) {
+        const s = parsedSteps[stepPtr++];
+        turnStepsCount++;
+        if (s.stepType !== 14 && ACTIVE_STATUSES.has(s.status)) hasActive = true;
+        if (s.stepType === 15 && (s.status === 3 || s.status === 5)) hasPlannerDone = true;
+        if (s.stepType === 23 && (s.status === 3 || s.status === 5)) turnCompactions++;
+        if (s.endedAtMs && s.endedAtMs > maxEndedAtMs) maxEndedAtMs = s.endedAtMs;
+        if (!NON_TOOL_STEPS.has(s.stepType) && s.createdAtMs && s.endedAtMs && s.endedAtMs >= s.createdAtMs) {
           turnToolIntervals.push([s.createdAtMs, s.endedAtMs]);
         }
       }
-      const turnCompactions = turnSteps.filter(s => s.stepType === 23 && (s.status === 3 || s.status === 5)).length;
+      while (execPtr < completedExecIdxs.length && completedExecIdxs[execPtr] <= endIdx) {
+        execPtr++;
+        hasExecutorDone = true;
+      }
+
+      const completed = !hasActive && (hasPlannerDone || hasExecutorDone);
 
       return {
         turnIndex: i,
         userStepIndex: startIdx,
         endStepIndex: endIdx,
         completed,
-        hasReply: plannerDoneSteps.length > 0,
+        hasReply: hasPlannerDone,
         uncached: 0,
         cached: 0,
         output: 0,
         total: 0,
         cacheHitPct: null,
         reqCount: 0,
-        stepsCount: turnSteps.length,
+        stepsCount: turnStepsCount,
         compactionsCount: turnCompactions,
         subagentCount: 0,
         subagentTokens: 0,
@@ -599,13 +649,14 @@ function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {})
         modelId: '',
         models: [],
         modelBreakdown: [],
-        endedAtMs: lastEnded.length ? Math.max(...lastEnded) : null,
+        endedAtMs: maxEndedAtMs > 0 ? maxEndedAtMs : null,
       };
     });
 
     for (const g of parsedGens) {
       const refIdx = g.stepIndices.length ? Math.max(...g.stepIndices) : g.lastStepIndex;
-      const turn = turns.findLast(t => t.userStepIndex <= refIdx) || turns[turns.length - 1];
+      const tIdx = findLastIndexLE(turns, t => t.userStepIndex, refIdx);
+      const turn = tIdx >= 0 ? turns[tIdx] : turns[turns.length - 1];
       if (!turn) continue;
       turn.uncached += g.uncached;
       turn.cached += g.cached;
@@ -658,7 +709,7 @@ function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {})
   };
 }
 
-function isTransientSqliteLockError(err) {
+export function isTransientSqliteLockError(err) {
   if (!err) return false;
   if (err.errcode === 5 || err.errcode === 6) return true;
   const hay = [err.code, err.errstr, err.message].filter(Boolean).join(' ').toLowerCase();
@@ -779,9 +830,11 @@ export function buildConversationTelemetry(dbPath, trackDep) {
   const allSubagents = [];
 
   for (const ref of main.subagentRefs) {
-    const launchTurn = ref.launchedAtStep >= 0
-      ? (turns.findLast(t => t.userStepIndex <= ref.launchedAtStep) || null)
-      : null;
+    let launchTurn = null;
+    if (ref.launchedAtStep >= 0) {
+      const ltIdx = findLastIndexLE(turns, t => t.userStepIndex, ref.launchedAtStep);
+      launchTurn = ltIdx >= 0 ? turns[ltIdx] : null;
+    }
     const tree = readSubagentTree(ref, {
       convDir,
       trackDep,

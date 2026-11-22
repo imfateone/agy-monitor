@@ -38,14 +38,42 @@ export function matchTurnBarsToCompleted(entries, completed, nowMs = Date.now())
     const defaultErr = Math.abs(Math.max(0, nowMs - lastTurn.endedAtMs) - lastBar.barAgeMs);
     const tol = Math.max(120_000, lastBar.barAgeMs * 0.45);
     if (defaultErr > tol) {
+      let kMin = entries.length - 1;
+      let kMax = completed.length - 1;
+      if (completed.length > 256 && completed[0]?.endedAtMs && lastTurn?.endedAtMs) {
+        const targetEnd = nowMs - lastBar.barAgeMs;
+        let lo = 0;
+        let hi = completed.length - 1;
+        let est = completed.length - 1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >>> 1;
+          const em = completed[mid]?.endedAtMs || 0;
+          if (em <= targetEnd) { est = mid; lo = mid + 1; }
+          else hi = mid - 1;
+        }
+        kMin = Math.max(kMin, est - 64);
+        kMax = Math.min(kMax, est + 64);
+      }
+      const sampleIdxs = [];
+      if (entries.length <= 16) {
+        for (let i = 0; i < entries.length; i++) sampleIdxs.push(i);
+      } else {
+        const step = (entries.length - 1) / 15;
+        let prev = -1;
+        for (let s = 0; s < 16; s++) {
+          const idx = Math.round(s * step);
+          if (idx !== prev) { sampleIdxs.push(idx); prev = idx; }
+        }
+      }
       let bestK = endIdx;
       let bestAvgErr = Infinity;
       let bestLastErr = defaultErr;
-      for (let k = completed.length - 1; k >= entries.length - 1; k--) {
+      for (let k = kMax; k >= kMin; k--) {
         let sumErr = 0;
         let checked = 0;
         let lastErr = Infinity;
-        for (let i = 0; i < entries.length; i++) {
+        for (let j = 0; j < sampleIdxs.length; j++) {
+          const i = sampleIdxs[j];
           const bar = entries[entries.length - 1 - i];
           const turn = completed[k - i];
           if (bar?.barAgeMs != null && turn?.endedAtMs) {
@@ -839,43 +867,55 @@ function installRuntime(ownerTs, codeHash) {
   }
 
   // Locate completed assistant turn feedback/action bars inside the active chat pane.
+  function resolveChatRoot(composerFooter) {
+    let chatRoot = composerFooter;
+    if (!chatRoot) return document;
+    for (let i = 0; i < 20 && chatRoot.parentElement && chatRoot.parentElement !== document.body; i++) {
+      const p = chatRoot.parentElement;
+      const r = p.getBoundingClientRect();
+      chatRoot = p;
+      if (r.height > window.innerHeight * 0.55 && r.width < window.innerWidth * 0.92 && p.querySelectorAll('button').length >= 8) break;
+    }
+    return chatRoot || document;
+  }
+
   function findTurnActionBars() {
     const composerFooter = document.querySelector('.agy-composer-footer');
     const cfRect = composerFooter?.getBoundingClientRect();
     const withinChatX = (r) => !cfRect || cfRect.width <= 0 || (r.left >= cfRect.left - 80 && r.right <= cfRect.right + 120);
+    const chatScope = resolveChatRoot(composerFooter);
     const results = new Map();
 
-    // Primary matcher: Antigravity assistant response feedback buttons (e.g. 好的回答 / Good response).
-    const feedbackBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
-    for (const btn of feedbackBtns) {
-      if (btn.closest('.agy-composer-footer, pre, code, .group\\/user-input-step, #agy-monitor-footer-host, #agy-monitor-popover-host')) continue;
-      const label = [btn.getAttribute('aria-label'), btn.getAttribute('title'), btn.getAttribute('data-testid')].filter(Boolean).join(' ');
-      if (!/(好的回答|Good response|Thumbs up|点赞|helpful)/i.test(label)) continue;
-      const r = btn.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0 || r.width > 48 || r.height > 48) continue;
-      if (!withinChatX(r)) continue;
-      const d1 = btn.parentElement;
-      const d2 = d1?.parentElement;
-      const d3 = d2?.parentElement;
-      const ageEl = d2?.querySelector(':scope > span:not([data-agy-turn-host])') || d3?.querySelector(':scope > span:not([data-agy-turn-host])');
-      const barAgeMs = parseRelativeAgeMs(ageEl?.textContent);
-      if (d3 && /\bw-full\b/.test(String(d3.className || '')) && /\bjustify-between\b/.test(String(d3.className || ''))) {
-        if (!results.has(d3)) results.set(d3, { bar: d3, mode: 'prepend', anchor: d2, barAgeMs });
-      } else if (d1 && !results.has(d1)) {
-        results.set(d1, { bar: d1, mode: 'append', anchor: null, barAgeMs });
+    const scanFeedbackIn = (root) => {
+      const feedbackBtns = Array.from(root.querySelectorAll('button, [role="button"]'));
+      for (const btn of feedbackBtns) {
+        if (btn.closest('.agy-composer-footer, pre, code, .group\\/user-input-step, #agy-monitor-footer-host, #agy-monitor-popover-host')) continue;
+        const label = [btn.getAttribute('aria-label'), btn.getAttribute('title'), btn.getAttribute('data-testid')].filter(Boolean).join(' ');
+        if (!/(好的回答|Good response|Thumbs up|点赞|helpful)/i.test(label)) continue;
+        const r = btn.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0 || r.width > 48 || r.height > 48) continue;
+        if (!withinChatX(r)) continue;
+        const d1 = btn.parentElement;
+        const d2 = d1?.parentElement;
+        const d3 = d2?.parentElement;
+        const ageEl = d2?.querySelector(':scope > span:not([data-agy-turn-host])') || d3?.querySelector(':scope > span:not([data-agy-turn-host])');
+        const barAgeMs = parseRelativeAgeMs(ageEl?.textContent);
+        if (d3 && /\bw-full\b/.test(String(d3.className || '')) && /\bjustify-between\b/.test(String(d3.className || ''))) {
+          if (!results.has(d3)) results.set(d3, { bar: d3, mode: 'prepend', anchor: d2, barAgeMs, top: r.top });
+        } else if (d1 && !results.has(d1)) {
+          results.set(d1, { bar: d1, mode: 'append', anchor: null, barAgeMs, top: r.top });
+        }
       }
-    }
+    };
+
+    // Primary matcher narrowed to chat container first; fall back to document if needed
+    scanFeedbackIn(chatScope);
+    if (results.size === 0 && chatScope !== document) scanFeedbackIn(document);
 
     // Fallback matcher if feedback labels change in future Antigravity builds.
     if (results.size === 0 && composerFooter) {
-      let chatRoot = composerFooter;
-      for (let i = 0; i < 20 && chatRoot.parentElement && chatRoot.parentElement !== document.body; i++) {
-        const p = chatRoot.parentElement;
-        const r = p.getBoundingClientRect();
-        chatRoot = p;
-        if (r.height > window.innerHeight * 0.55 && r.width < window.innerWidth * 0.92 && p.querySelectorAll('button').length >= 8) break;
-      }
-      const candidates = new Set();
+      const chatRoot = chatScope === document ? resolveChatRoot(composerFooter) : chatScope;
+      const candidates = [];
       for (const btn of chatRoot.querySelectorAll('button, [role="button"]')) {
         if (btn.closest('.agy-composer-footer, pre, code, .group\\/user-input-step, #agy-monitor-footer-host, #agy-monitor-popover-host')) continue;
         const r = btn.getBoundingClientRect();
@@ -887,20 +927,22 @@ function installRuntime(ownerTs, codeHash) {
         if (rowBtns.length === 3 || (rowBtns.length >= 2 && rowBtns.length <= 5 && r.top > 72)) {
           const rr = row.getBoundingClientRect();
           if (rr.height > 0 && rr.height <= 48 && (!cfRect || rr.bottom <= cfRect.top + 8)) {
-            candidates.add(row);
+            candidates.push({ el: row, top: rr.top });
           }
         }
       }
-      const arr = Array.from(candidates);
-      for (const el of arr) {
-        if (!arr.some(other => other !== el && el.contains(other))) {
-          results.set(el, { bar: el, mode: 'append', anchor: null });
+      const seen = new Set();
+      for (const item of candidates) {
+        if (seen.has(item.el)) continue;
+        seen.add(item.el);
+        if (!candidates.some(other => other.el !== item.el && item.el.contains(other.el))) {
+          results.set(item.el, { bar: item.el, mode: 'append', anchor: null, top: item.top });
         }
       }
     }
 
     const list = Array.from(results.values());
-    list.sort((a, b) => a.bar.getBoundingClientRect().top - b.bar.getBoundingClientRect().top);
+    list.sort((a, b) => a.top - b.top);
     return list;
   }
 
@@ -982,14 +1024,24 @@ function installRuntime(ownerTs, codeHash) {
   }
 
   let rafId = 0;
-  const scheduleRender = () => {
+  let throttleTimer = 0;
+  let lastRenderAt = 0;
+  const runRenderFrame = () => {
+    throttleTimer = 0;
     if (!state.lastData || rafId) return;
     rafId = requestAnimationFrame(() => {
       rafId = 0;
       if (!state.lastData) return;
+      lastRenderAt = Date.now();
       renderFooterStrip(state.lastData);
       renderTurnPills(state.lastData);
     });
+  };
+  const scheduleRender = () => {
+    if (!state.lastData || rafId || throttleTimer) return;
+    const elapsed = Date.now() - lastRenderAt;
+    if (elapsed >= 120) runRenderFrame();
+    else throttleTimer = setTimeout(runRenderFrame, 120 - elapsed);
   };
   const domObs = new MutationObserver((mutations) => {
     if (!state.lastData) return;
@@ -1020,7 +1072,7 @@ function installRuntime(ownerTs, codeHash) {
   globalThis.__agyMonitorDeck = {
     owner: ownerTs,
     hash: codeHash,
-    readState(expectedOwner) {
+    readState(expectedOwner, wantSample = false) {
       if (state.owner > expectedOwner) return 'superseded';
       return {
         owner: state.owner,
@@ -1031,7 +1083,7 @@ function installRuntime(ownerTs, codeHash) {
         hasData: !!state.lastData,
         hasFooter: !!document.querySelector('.surface-composer, .agy-composer-footer > div:first-child'),
         matchedTurnFooters: state.matchedTurnFooters,
-        sample: inspectDomSample(),
+        sample: wantSample ? inspectDomSample() : null,
       };
     },
     apply(data, path, expectedOwner) {
@@ -1039,6 +1091,7 @@ function installRuntime(ownerTs, codeHash) {
       state.lastData = data;
       state.lastPath = path;
       state.applyCalls = (state.applyCalls || 0) + 1;
+      lastRenderAt = Date.now();
       renderFooterStrip(data);
       renderTurnPills(data);
       return true;
@@ -1046,6 +1099,7 @@ function installRuntime(ownerTs, codeHash) {
     dispose() {
       domObs.disconnect();
       document.removeEventListener('scroll', scheduleRender, true);
+      if (throttleTimer) clearTimeout(throttleTimer);
       if (rafId) cancelAnimationFrame(rafId);
       document.removeEventListener('click', onDocClick);
       document.removeEventListener('keydown', onDocKey);
@@ -1075,8 +1129,11 @@ export function startMonitorInjector(getPayload, options = {}) {
   const owner = options.instanceTs ?? INSTANCE_TS;
   const bundle = buildRuntimeBundle(owner);
   const sockets = new Map();
+  const backoffUntil = new Map();
   let cachedPages = [];
   let lastListAt = 0;
+  let lastPort = '';
+  let listFailCount = 0;
   let cdpState = 'unknown';
   let matchedTurnFooters = 0;
   let stopped = false;
@@ -1091,9 +1148,13 @@ export function startMonitorInjector(getPayload, options = {}) {
     if (sockets.get(id) === entry) sockets.delete(id);
   };
 
+  const retireAll = () => {
+    for (const [id, entry] of [...sockets]) retire(entry, id);
+  };
+
   const connect = async target => {
     const ws = new WebSocket(target.webSocketDebuggerUrl);
-    const entry = { ws, pending: new Map(), nextId: 1, lastPayload: '', lastPath: '' };
+    const entry = { ws, pending: new Map(), nextId: 1, lastPayload: '', lastPath: '', consecutiveTimeouts: 0 };
     await new Promise((resolve, reject) => {
       const fail = msg => { clearTimeout(timer); retire(entry, target.id); reject(new Error(msg)); };
       const timer = setTimeout(() => fail('ws timeout'), 3000);
@@ -1113,11 +1174,23 @@ export function startMonitorInjector(getPayload, options = {}) {
     return entry;
   };
 
-  const evaluate = (entry, expression) => new Promise(resolve => {
+  const evaluate = (entry, expression, targetId = '') => new Promise(resolve => {
     if (entry.ws.readyState !== 1) return resolve(undefined);
     const id = entry.nextId++;
-    const timer = setTimeout(() => { entry.pending.delete(id); resolve(undefined); }, 3000);
-    entry.pending.set(id, msg => { clearTimeout(timer); resolve(msg?.result?.result?.value); });
+    const timer = setTimeout(() => {
+      entry.pending.delete(id);
+      entry.consecutiveTimeouts = (entry.consecutiveTimeouts || 0) + 1;
+      if (entry.consecutiveTimeouts >= 2 && targetId) {
+        retire(entry, targetId);
+        backoffUntil.set(targetId, Date.now() + 5000);
+      }
+      resolve(undefined);
+    }, 3000);
+    entry.pending.set(id, msg => {
+      clearTimeout(timer);
+      entry.consecutiveTimeouts = 0;
+      resolve(msg?.result?.result?.value);
+    });
     try { entry.ws.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true } })); }
     catch { clearTimeout(timer); entry.pending.delete(id); resolve(undefined); }
   });
@@ -1142,7 +1215,19 @@ export function startMonitorInjector(getPayload, options = {}) {
     if (cachedPages.length && Date.now() - lastListAt < 4000) return cachedPages;
     let port;
     try { port = readFileSync(options.portFile || PORT_FILE, 'utf8').split(/\r?\n/)[0].trim(); }
-    catch { cdpState = 'missing'; return []; }
+    catch {
+      cdpState = 'missing';
+      lastPort = '';
+      listFailCount++;
+      cachedPages = [];
+      retireAll();
+      return [];
+    }
+    if (lastPort && port !== lastPort) {
+      cachedPages = [];
+      retireAll();
+    }
+    lastPort = port;
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) });
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1150,12 +1235,18 @@ export function startMonitorInjector(getPayload, options = {}) {
       lastTargetSummary = targets.map(t => ({ type: t.type, url: String(t.url || '').split('?')[0].slice(0, 120) }));
       cachedPages = targets.filter(t => t.type === 'page' && /^https?:\/\/127\.0\.0\.1:\d+\//.test(t.url || '') && t.webSocketDebuggerUrl);
       lastListAt = Date.now();
+      listFailCount = 0;
       cdpState = 'ok';
       const ids = new Set(cachedPages.map(t => t.id));
       for (const [id, entry] of sockets) if (!ids.has(id)) retire(entry, id);
       return cachedPages;
     } catch {
       cdpState = 'unreachable';
+      listFailCount++;
+      if (listFailCount >= 2) {
+        cachedPages = [];
+        retireAll();
+      }
       return [];
     }
   };
@@ -1165,7 +1256,7 @@ export function startMonitorInjector(getPayload, options = {}) {
     stopped = true;
     clearInterval(timer);
     await Promise.all([...sockets].map(async ([id, entry]) => {
-      try { await evaluate(entry, `globalThis.__agyMonitorDeck?.owner===${owner}&&globalThis.__agyMonitorDeck.dispose()`); }
+      try { await evaluate(entry, `globalThis.__agyMonitorDeck?.owner===${owner}&&globalThis.__agyMonitorDeck.dispose()`, id); }
       finally { retire(entry, id); }
     }));
   };
@@ -1174,19 +1265,21 @@ export function startMonitorInjector(getPayload, options = {}) {
     if (busy || stopped) return;
     busy = true;
     const pagesReport = [];
+    const wantSampleArg = diagEnabled ? 'true' : 'false';
     try {
       for (const target of await listPages()) {
         if (stopped) break;
+        if ((backoffUntil.get(target.id) || 0) > Date.now()) continue;
         try {
           const entry = sockets.get(target.id) || await connect(target);
-          let st = await evaluate(entry, `globalThis.__agyMonitorDeck?.readState(${owner})??null`);
+          let st = await evaluate(entry, `globalThis.__agyMonitorDeck?.readState(${owner},${wantSampleArg})??null`, target.id);
           if (st === 'superseded') { await stop(); process.exit(0); return; }
           if (st?.owner !== owner || st.hash !== bundle.hash) {
-            const installed = await evaluate(entry, bundle.code);
+            const installed = await evaluate(entry, bundle.code, target.id);
             if (installed === 'superseded') { await stop(); process.exit(0); return; }
             if (!installed || stopped) continue;
             entry.lastPayload = '';
-            st = await evaluate(entry, `globalThis.__agyMonitorDeck?.readState(${owner})??null`);
+            st = await evaluate(entry, `globalThis.__agyMonitorDeck?.readState(${owner},${wantSampleArg})??null`, target.id);
           }
           if (!st || st.owner !== owner || !st.hasFooter) {
             pagesReport.push({ url: String(target.url || '').split('?')[0].slice(0, 120), st });
@@ -1201,12 +1294,12 @@ export function startMonitorInjector(getPayload, options = {}) {
           }
           const json = JSON.stringify(data);
           if (entry.lastPayload !== json || entry.lastPath !== st.path || !st.hasData) {
-            const ok = await evaluate(entry, `globalThis.__agyMonitorDeck?.apply(${json},${JSON.stringify(st.path)},${owner})??false`);
+            const ok = await evaluate(entry, `globalThis.__agyMonitorDeck?.apply(${json},${JSON.stringify(st.path)},${owner})??false`, target.id);
             if (ok === 'superseded') { await stop(); process.exit(0); return; }
             if (ok) {
               entry.lastPayload = json;
               entry.lastPath = st.path;
-              st = await evaluate(entry, `globalThis.__agyMonitorDeck?.readState(${owner})??null`);
+              st = await evaluate(entry, `globalThis.__agyMonitorDeck?.readState(${owner},${wantSampleArg})??null`, target.id);
               if (Number.isFinite(st?.matchedTurnFooters)) matchedTurnFooters = st.matchedTurnFooters;
             }
           }

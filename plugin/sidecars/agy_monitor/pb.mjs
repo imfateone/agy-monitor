@@ -11,11 +11,12 @@ export function readVarint(buf, offset) {
     val |= BigInt(b & 0x7f) << shift;
     if ((b & 0x80) === 0) return [Number(val), i];
     shift += 7n;
+    if (shift > 63n) break;
   }
   return [Number(val), i];
 }
 
-export function parsePbMap(buf) {
+export function parsePbMap(buf, allowedFields = null) {
   const fields = new Map();
   if (!buf || !buf.length) return fields;
   let i = 0;
@@ -26,24 +27,29 @@ export function parsePbMap(buf) {
       const fn = tag >>> 3;
       const wt = tag & 7;
       if (fn === 0) break;
-      if (!fields.has(fn)) fields.set(fn, []);
+      const keep = !allowedFields || allowedFields.has(fn);
+      let bucket = keep ? fields.get(fn) : null;
+      if (keep && !bucket) {
+        bucket = [];
+        fields.set(fn, bucket);
+      }
       if (wt === 0) {
         const [val, nI] = readVarint(buf, i);
         i = nI;
-        fields.get(fn).push(val);
+        if (keep) bucket.push(val);
       } else if (wt === 2) {
         const [len, nI] = readVarint(buf, i);
         i = nI;
         if (len < 0 || i + len > buf.length) break;
-        fields.get(fn).push(buf.subarray(i, i + len));
+        if (keep) bucket.push(buf.subarray(i, i + len));
         i += len;
       } else if (wt === 5) {
         if (i + 4 > buf.length) break;
-        fields.get(fn).push(buf.subarray(i, i + 4));
+        if (keep) bucket.push(buf.subarray(i, i + 4));
         i += 4;
       } else if (wt === 1) {
         if (i + 8 > buf.length) break;
-        fields.get(fn).push(buf.subarray(i, i + 8));
+        if (keep) bucket.push(buf.subarray(i, i + 8));
         i += 8;
       } else {
         break;

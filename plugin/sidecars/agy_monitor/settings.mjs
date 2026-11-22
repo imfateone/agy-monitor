@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   enableFooterBar: true,
   enableTurnPills: true,
   showQuotaInSidebar: true,
+  showCostEstimate: true,
 });
 
 const CHOICES = {
@@ -14,6 +15,7 @@ const CHOICES = {
   enableFooterBar: [true, false],
   enableTurnPills: [true, false],
   showQuotaInSidebar: [true, false],
+  showCostEstimate: [true, false],
 };
 
 export function normalizeSettings(raw = {}) {
