@@ -6,7 +6,7 @@ import { Worker } from 'node:worker_threads';
 import { parsePbMap, parseTimestampMs } from './pb.mjs';
 import { isTransientSqliteLockError, parseGenRow, stampDb } from './telemetry.mjs';
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const STEP_TS_FIELDS = new Set([1, 7, 8]);
 
 export const TOKEN_TYPE_COLORS = Object.freeze({
@@ -62,7 +62,9 @@ export function getModelRate(modelName) {
   if (/claude.*opus|\bopus\b/i.test(s)) return { uncached: 5.0, cached: 0.5, output: 25.0 };
   if (/claude.*haiku|\bhaiku\b/i.test(s)) return { uncached: 1.0, cached: 0.1, output: 5.0 };
   if (/claude|sonnet/i.test(s)) return { uncached: 3.0, cached: 0.3, output: 15.0 };
-  if (/flash|lite/i.test(s)) return { uncached: 0.3, cached: 0.03, output: 2.5 };
+  if (/flash.*lite|\blite\b/i.test(s)) return { uncached: 0.1, cached: 0.01, output: 0.4 };
+  if (/flash/i.test(s)) return { uncached: 0.3, cached: 0.03, output: 2.5 };
+  if (/(?:^|[-_\s])(?:mini|nano)\b/i.test(s)) return { uncached: 0.4, cached: 0.04, output: 1.6 };
   if (/\bo[134]\b/i.test(s) && !/gemini|hydrogen|carbon|neon|argon/i.test(s)) return { uncached: 2.0, cached: 0.5, output: 8.0 };
   if (/gpt|codex|openai/i.test(s)) return { uncached: 2.0, cached: 0.2, output: 14.0 };
   if (/gemini|hydrogen|carbon|neon|argon|orchestrator/i.test(s)) return { uncached: 2.0, cached: 0.2, output: 12.0 };
@@ -134,6 +136,7 @@ function emptyModelStat() {
     thinking: 0,
     reply: 0,
     output: 0,
+    thinkingTrackedOutput: 0,
     total: 0,
     reqs: 0,
     modelSec: 0,
@@ -150,11 +153,13 @@ function accumulateModelStat(targetMap, modelName, gen) {
     cur = emptyModelStat();
     Object.defineProperty(targetMap, modelName, { value: cur, enumerable: true, writable: true, configurable: true });
   }
+  const outVal = gen.output || 0;
   cur.uncached += gen.uncached;
   cur.cached += gen.cached;
   cur.thinking += gen.thinking;
   cur.reply += gen.reply;
-  cur.output += gen.output;
+  cur.output += outVal;
+  cur.thinkingTrackedOutput += gen.thinkingTrackedOutput ?? outVal;
   cur.total += gen.total;
   cur.reqs += gen.reqs;
   cur.modelSec += gen.modelSec;
@@ -222,9 +227,11 @@ function scanDbForUsage(dbPath) {
     const hasStream = pg.streaming !== null && pg.streaming >= 0;
     const dur = (hasTtft ? pg.ttft : 0) + (hasStream ? pg.streaming : 0);
     const modelSec = dur > 0 ? dur : 0;
-    const timedOut = hasStream && pg.streaming > 0 && dur > 0 ? (pg.latestOutput || output) : 0;
-    const timedSec = timedOut > 0 ? dur : 0;
+    const latestOut = pg.latestOutput || 0;
+    const timedOut = (hasStream && pg.streaming > 0 && latestOut > 0) ? latestOut : 0;
+    const timedSec = timedOut > 0 ? pg.streaming : 0;
     const modelName = String(pg.model || pg.modelId || 'Unknown').trim() || 'Unknown';
+    const thinkingTrackedOutput = (thinking === 0 && /claude/i.test(modelName)) ? 0 : output;
 
     let tsMs = 0;
     for (const si of pg.stepIndices) {
@@ -248,6 +255,7 @@ function scanDbForUsage(dbPath) {
       thinking,
       reply,
       output,
+      thinkingTrackedOutput,
       total,
       reqs: 1,
       modelSec,
@@ -273,6 +281,7 @@ function makeEmptyBucket() {
     thinking: 0,
     reply: 0,
     output: 0,
+    thinkingTrackedOutput: 0,
     total: 0,
     reqs: 0,
     modelSec: 0,
@@ -286,11 +295,13 @@ function makeEmptyBucket() {
 
 function mergeBucketModels(bucket, modelMap) {
   for (const [modelName, st] of Object.entries(modelMap)) {
+    const outVal = st.output || 0;
     bucket.uncached += st.uncached;
     bucket.cached += st.cached;
     bucket.thinking += st.thinking;
     bucket.reply += st.reply;
-    bucket.output += st.output;
+    bucket.output += outVal;
+    bucket.thinkingTrackedOutput += st.thinkingTrackedOutput ?? outVal;
     bucket.total += st.total;
     bucket.reqs += st.reqs;
     bucket.modelSec += st.modelSec;
@@ -348,25 +359,24 @@ export function createUsageStatsCollector({
       cache = { version: CACHE_VERSION, tz: tzSig, files: {} };
     }
 
-    if (!existsSync(convDir)) {
-      if (dirty) persist();
-      return {
-        version: CACHE_VERSION,
-        generatedAtMs: nowMs,
-        todayYmd,
-        dbCount: 0,
-        days: {},
-        todayHours: Array.from({ length: 24 }, (_, hour) => ({ hour, ...makeEmptyBucket() })),
-      };
+    if (forceRefresh && Object.keys(cache.files).length > 0) {
+      cache.files = {};
+      dirty = true;
     }
 
-    const dbFiles = readdirSync(convDir).filter(f => f.endsWith('.db'));
+    const dbFiles = existsSync(convDir) ? readdirSync(convDir).filter(f => f.endsWith('.db')) : [];
     const present = new Set(dbFiles);
 
-    for (const key of Object.keys(cache.files)) {
-      if (!present.has(key)) {
-        delete cache.files[key];
-        dirty = true;
+    if (!forceRefresh) {
+      for (const [key, entry] of Object.entries(cache.files)) {
+        if (present.has(key)) continue;
+        const oldHours = entry?.hours || {};
+        const pruned = pruneHoursMap(oldHours, keepSinceYmd);
+        if (!entry.archived || Object.keys(pruned).length !== Object.keys(oldHours).length) {
+          entry.hours = pruned;
+          entry.archived = true;
+          dirty = true;
+        }
       }
     }
 
@@ -375,7 +385,7 @@ export function createUsageStatsCollector({
       const stamp = stampDb(fullPath);
       if (!stamp) continue;
       const prev = cache.files[file];
-      if (!forceRefresh && prev && prev.stamp === stamp) continue;
+      if (!forceRefresh && prev && prev.stamp === stamp && !prev.archived) continue;
 
       try {
         const scanned = scanDbForUsage(fullPath);
@@ -400,8 +410,7 @@ export function createUsageStatsCollector({
     const todayHours = Array.from({ length: 24 }, (_, hour) => ({ hour, ...makeEmptyBucket() }));
     const todayPrefix = `${todayYmd}|`;
 
-    for (const file of dbFiles) {
-      const entry = cache.files[file];
+    for (const entry of Object.values(cache.files)) {
       if (!entry) continue;
       for (const [ymd, modelMap] of Object.entries(entry.days || {})) {
         if (!days[ymd]) days[ymd] = makeEmptyBucket();

@@ -262,13 +262,11 @@ function addGenToModelMap(map, g) {
   }
   if (g.ttft !== null && g.streaming !== null) {
     const dur = g.ttft + g.streaming;
-    if (dur >= 0) {
-      cur.modelSec += dur;
-      if (g.latestOutput > 0 && dur > 0) {
-        cur._timedOutput += g.latestOutput;
-        cur._timedModelSec += dur;
-      }
-    }
+    if (dur >= 0) cur.modelSec += dur;
+  }
+  if (g.streaming !== null && g.streaming > 0 && g.latestOutput > 0) {
+    cur._timedOutput += g.latestOutput;
+    cur._timedModelSec += g.streaming;
   }
 }
 
@@ -540,13 +538,11 @@ function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {})
     }
     if (g.ttft !== null && g.streaming !== null) {
       const dur = g.ttft + g.streaming;
-      if (dur >= 0) {
-        modelSec += dur;
-        if (g.latestOutput > 0 && dur > 0) {
-          timedOutput += g.latestOutput;
-          timedModelSec += dur;
-        }
-      }
+      if (dur >= 0) modelSec += dur;
+    }
+    if (g.streaming !== null && g.streaming > 0 && g.latestOutput > 0) {
+      timedOutput += g.latestOutput;
+      timedModelSec += g.streaming;
     }
     if (g.maxContextTokens > 0) latestMaxContext = g.maxContextTokens;
 
@@ -669,13 +665,11 @@ function readDbSnapshot(dbPath, { convDir, visited, includeTurns = false } = {})
       }
       if (g.ttft !== null && g.streaming !== null) {
         const dur = g.ttft + g.streaming;
-        if (dur >= 0) {
-          turn.modelSec += dur;
-          if (g.latestOutput > 0 && dur > 0) {
-            turn._timedOutput += g.latestOutput;
-            turn._timedModelSec += dur;
-          }
-        }
+        if (dur >= 0) turn.modelSec += dur;
+      }
+      if (g.streaming !== null && g.streaming > 0 && g.latestOutput > 0) {
+        turn._timedOutput += g.latestOutput;
+        turn._timedModelSec += g.streaming;
       }
       if (g.model) turn.model = g.model;
       if (g.modelId) turn.modelId = g.modelId;

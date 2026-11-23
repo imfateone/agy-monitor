@@ -226,7 +226,7 @@ export function renderSidebarHtml() {
         subTabOverview: '总览汇总', subTabModels: (n) => '分模型 (' + n + ')', subTabTurnSummary: '本轮汇总',
         reqCountLabel: '调用次数', emptyModels: '当前会话暂无模型调用记录',
         tokTitle: 'Token 用量', cacheHit: '缓存命中', uncachedIn: '未缓存输入', cachedRead: '缓存读取', output: '输出',
-        ctxTitle: '上下文已用', quotaTitle: '模型配额', cdpOk: '页面胶囊已挂载', cdpOff: '未连上页面调试端口（仅侧栏可用）',
+        ctxTitle: '上下文已用', ctxEstNote: '总占用为服务端实测，分类拆解为客户端估算', quotaTitle: '模型配额', cdpOk: '页面胶囊已挂载', cdpOff: '未连上页面调试端口（仅侧栏可用）',
         cdpHint: 'Antigravity 2.33+ 默认关闭调试端口：请在启动快捷方式「目标」末尾加上 --remote-debugging-port=0，完全退出后重开即可恢复底部条和每轮胶囊。',
         matchedFooters: (n) => '本页已挂载回复条：' + n + ' 条',
         turnHeader: (i) => '第 ' + (i + 1) + ' 轮', turnSteps: '本轮步数', stepsUnit: (s) => s + ' 步', modelLabel: '提供方 / 模型', emptyTurns: '当前会话暂无已完成轮次',
@@ -240,6 +240,7 @@ export function renderSidebarHtml() {
         uClearFilter: '清除筛选', uFilteredDay: (d) => '已筛选单日：' + d, uFilteredHour: (h) => '已筛选时段：' + h + ':00',
         uSummaryTitle: '汇总用量', uActiveDays: (r, d) => r + ' 次 · ' + d + ' 天',
         uThinkReply: '思考 / 正文输出', uThinkRatio: (p) => '思考占输出 ' + p + '%',
+        uThinkUnsplit: '所选模型未上报思考拆分', uThinkExcl: '不含未拆分模型', uUnsplitShort: '未拆分',
         uCostLabel: '等效费用', uSavedLabel: '缓存省下', uModelsTitle: '分模型累计',
         uTypeCached: '缓存读取', uTypeUncached: '未缓存输入', uTypeThinking: '思考输出', uTypeReply: '正文输出',
         uEmpty: '该时间范围内暂无模型用量记录', uLoading: '正在统计本地会话用量…',
@@ -260,7 +261,7 @@ export function renderSidebarHtml() {
         subTabOverview: 'Summary', subTabModels: (n) => 'By Model (' + n + ')', subTabTurnSummary: 'Summary',
         reqCountLabel: 'Requests', emptyModels: 'No model usage yet',
         tokTitle: 'Token Usage', cacheHit: 'Cache hit', uncachedIn: 'Uncached input', cachedRead: 'Cache read', output: 'Output',
-        ctxTitle: 'Context used', quotaTitle: 'Model Quotas', cdpOk: 'In-page pills active', cdpOff: 'Debugging port unavailable (sidebar only)',
+        ctxTitle: 'Context used', ctxEstNote: 'Total is server-reported; breakdown is client-estimated', quotaTitle: 'Model Quotas', cdpOk: 'In-page pills active', cdpOff: 'Debugging port unavailable (sidebar only)',
         cdpHint: 'Antigravity 2.33+ disables the debugging port by default. Append --remote-debugging-port=0 to your shortcut Target and restart Antigravity completely to restore in-page pills.',
         matchedFooters: (n) => 'Matched turn footers: ' + n,
         turnHeader: (i) => 'Turn #' + (i + 1), turnSteps: 'Steps', stepsUnit: (s) => s + ' steps', modelLabel: 'Provider / Model', emptyTurns: 'No completed turns yet',
@@ -274,6 +275,7 @@ export function renderSidebarHtml() {
         uClearFilter: 'Clear', uFilteredDay: (d) => 'Day: ' + d, uFilteredHour: (h) => 'Hour: ' + h + ':00',
         uSummaryTitle: 'Summary', uActiveDays: (r, d) => r + ' reqs · ' + d + 'd',
         uThinkReply: 'Thinking / Reply', uThinkRatio: (p) => 'Thinking ' + p + '% of output',
+        uThinkUnsplit: 'Thinking split not reported by model(s)', uThinkExcl: 'excl. unsplit models', uUnsplitShort: 'unsplit',
         uCostLabel: 'Est. API Cost', uSavedLabel: 'Cache Saved', uModelsTitle: 'By Model',
         uTypeCached: 'Cached', uTypeUncached: 'Uncached', uTypeThinking: 'Thinking', uTypeReply: 'Reply',
         uEmpty: 'No usage recorded in this range', uLoading: 'Aggregating local usage stats…',
@@ -451,7 +453,9 @@ export function renderSidebarHtml() {
         + tokSubRow
         + '</div></div>'
         + '<div class="card"><div class="card-head"><span class="card-title">' + L.ctxTitle + ' <b>' + (c.usedPct || 0) + '%</b></span><span class="card-val">~' + fmtCompact(c.usedTokens) + ' / ' + (c.maxTokens > 0 ? fmtCompact(c.maxTokens) : '--') + '</span></div>'
-        + '<div class="bar">' + segs + '</div><div class="rows">' + catRows + '</div></div>'
+        + '<div class="bar">' + segs + '</div><div class="rows">' + catRows + '</div>'
+        + (cats.length > 0 ? '<div style="font-size:11px;color:var(--muted-foreground);margin-top:6px;line-height:1.4">' + esc(L.ctxEstNote) + '</div>' : '')
+        + '</div>'
         + subagentsHtml
         + quotaHtml;
 
@@ -563,19 +567,21 @@ export function renderSidebarHtml() {
       return '$' + (Number(v) || 0).toFixed(2);
     }
     function uEmptyAgg(key, label) {
-      return { key, label, uncached: 0, cached: 0, thinking: 0, reply: 0, output: 0, total: 0, reqs: 0, modelSec: 0, ttftSum: 0, ttftCount: 0, timedOutput: 0, timedModelSec: 0, byModel: {}, activeDays: 0 };
+      return { key, label, uncached: 0, cached: 0, thinking: 0, reply: 0, output: 0, thinkingTrackedOutput: 0, total: 0, reqs: 0, modelSec: 0, ttftSum: 0, ttftCount: 0, timedOutput: 0, timedModelSec: 0, byModel: {}, activeDays: 0 };
     }
     function uAddModelStats(target, modelName, st) {
       let cur = target[modelName];
       if (!cur) {
-        cur = { uncached: 0, cached: 0, thinking: 0, reply: 0, output: 0, total: 0, reqs: 0, modelSec: 0, ttftSum: 0, ttftCount: 0, timedOutput: 0, timedModelSec: 0 };
+        cur = { uncached: 0, cached: 0, thinking: 0, reply: 0, output: 0, thinkingTrackedOutput: 0, total: 0, reqs: 0, modelSec: 0, ttftSum: 0, ttftCount: 0, timedOutput: 0, timedModelSec: 0 };
         target[modelName] = cur;
       }
+      const outVal = st.output || 0;
       cur.uncached += st.uncached || 0;
       cur.cached += st.cached || 0;
       cur.thinking += st.thinking || 0;
       cur.reply += st.reply || 0;
-      cur.output += st.output || 0;
+      cur.output += outVal;
+      cur.thinkingTrackedOutput += st.thinkingTrackedOutput !== undefined ? (st.thinkingTrackedOutput || 0) : outVal;
       cur.total += st.total || 0;
       cur.reqs += st.reqs || 0;
       cur.modelSec += st.modelSec || 0;
@@ -588,11 +594,13 @@ export function renderSidebarHtml() {
       if (!bucket) return;
       if ((bucket.activeDays || 0) > 0) agg.activeDays += bucket.activeDays;
       else if ((bucket.total || 0) > 0) agg.activeDays += 1;
+      const outVal = bucket.output || 0;
       agg.uncached += bucket.uncached || 0;
       agg.cached += bucket.cached || 0;
       agg.thinking += bucket.thinking || 0;
       agg.reply += bucket.reply || 0;
-      agg.output += bucket.output || 0;
+      agg.output += outVal;
+      agg.thinkingTrackedOutput += bucket.thinkingTrackedOutput !== undefined ? (bucket.thinkingTrackedOutput || 0) : outVal;
       agg.total += bucket.total || 0;
       agg.reqs += bucket.reqs || 0;
       agg.modelSec += bucket.modelSec || 0;
@@ -690,11 +698,14 @@ export function renderSidebarHtml() {
         const colors = assignModelColors(Object.entries(b.byModel || {}).map(([name, st]) => ({ name, total: st.total })));
         const rows = Object.entries(b.byModel || {}).filter(([, st]) => st.total > 0).sort((a, c) => c[1].total - a[1].total).slice(0, 6)
           .map(([name, st]) => '<div class="row" style="font-size:11px"><span class="row-k"><span class="dot" style="background:' + (colors[name] || '#3b82f6') + '"></span><span style="overflow:hidden;text-overflow:ellipsis;max-width:130px">' + esc(name) + '</span></span><span class="row-v">' + fmtCompact(st.total) + '</span></div>').join('');
+        const bTracked = b.thinkingTrackedOutput !== undefined ? b.thinkingTrackedOutput : (b.output || 0);
+        const bUnsplit = (b.output || 0) > 0 && bTracked === 0 && (b.thinking || 0) === 0;
+        const tipThinkVal = bUnsplit ? ('— / ' + fmtCompact(b.reply) + ' (' + L.uUnsplitShort + ')') : (fmtCompact(b.thinking) + ' / ' + fmtCompact(b.reply));
         el.innerHTML = '<div style="font-weight:600;display:flex;justify-content:space-between;gap:8px;padding-bottom:5px;margin-bottom:5px;border-bottom:1px solid var(--border, rgba(128,128,128,0.2))"><span>' + esc(b.tipTitle || b.label) + '</span><span>' + fmtCompact(b.total) + ' tok</span></div>'
           + (b.total <= 0 ? '<div style="color:var(--muted-foreground, #71717a)">' + L.uEmpty + '</div>'
             : '<div class="rows" style="gap:4px">'
               + '<div class="row"><span class="row-k">' + L.cacheHit + '</span><span class="row-v">' + fmtPct(hit, 1) + '</span></div>'
-              + '<div class="row"><span class="row-k">' + L.uThinkReply + '</span><span class="row-v">' + fmtCompact(b.thinking) + ' / ' + fmtCompact(b.reply) + '</span></div>'
+              + '<div class="row"><span class="row-k">' + L.uThinkReply + '</span><span class="row-v">' + esc(tipThinkVal) + '</span></div>'
               + (showCost ? '<div class="row"><span class="row-k">' + L.uCostLabel + '</span><span class="row-v">' + uFmtUsd(costs.actualUsd) + '</span></div>' : '')
               + (rows ? '<div class="divider"></div>' + rows : '')
               + '</div>');
@@ -899,8 +910,13 @@ export function renderSidebarHtml() {
 
       const pin = selAgg.uncached + selAgg.cached;
       const hitPct = pin > 0 ? (selAgg.cached / pin) * 100 : null;
-      const thinkPct = selAgg.output > 0 ? (selAgg.thinking / selAgg.output) * 100 : 0;
-      const replyPct = selAgg.output > 0 ? 100 - thinkPct : 0;
+      const trackedOut = selAgg.thinkingTrackedOutput !== undefined ? selAgg.thinkingTrackedOutput : selAgg.output;
+      const allUnsplit = selAgg.output > 0 && trackedOut === 0 && selAgg.thinking === 0;
+      const hasUnsplit = selAgg.output > 0 && trackedOut > 0 && trackedOut < selAgg.output;
+      const thinkPct = trackedOut > 0 ? Math.min(100, (selAgg.thinking / trackedOut) * 100) : 0;
+      const replyPct = trackedOut > 0 ? Math.max(0, 100 - thinkPct) : (allUnsplit ? 100 : 0);
+      const summaryThinkVal = allUnsplit ? ('— / ' + fmtCompact(selAgg.output) + ' (' + L.uUnsplitShort + ')') : (fmtCompact(selAgg.thinking) + ' / ' + fmtCompact(selAgg.reply));
+      const summaryThinkNote = allUnsplit ? L.uThinkUnsplit : (hasUnsplit ? (L.uThinkRatio(Math.round(thinkPct)) + ' · ' + L.uThinkExcl) : L.uThinkRatio(Math.round(thinkPct)));
       const selCosts = uCalcCosts(selAgg.byModel);
       const selColors = assignModelColors(Object.entries(selAgg.byModel).map(([name, st]) => ({ name, total: st.total })));
       const selModels = Object.entries(selAgg.byModel).filter(([, st]) => st.total > 0).sort((a, c) => c[1].total - a[1].total);
@@ -916,6 +932,9 @@ export function renderSidebarHtml() {
             const mTtft = st.ttftCount > 0 ? st.ttftSum / st.ttftCount : null;
             const mCost = estimateModelCost(name, st.uncached, st.cached, st.output);
             const col = selColors[name] || '#3b82f6';
+            const mTracked = st.thinkingTrackedOutput !== undefined ? st.thinkingTrackedOutput : st.output;
+            const mUnsplit = (st.output || 0) > 0 && mTracked === 0 && (st.thinking || 0) === 0;
+            const mThinkVal = mUnsplit ? ('— / ' + fmtCompact(st.output) + ' (' + L.uUnsplitShort + ')') : (fmtCompact(st.thinking) + ' / ' + fmtCompact(st.reply));
             return '<div class="mblock">'
               + '<div class="mhead"><span class="mname" style="display:inline-flex;align-items:center;gap:6px"><span class="dot" style="background:' + col + '"></span><span style="overflow:hidden;text-overflow:ellipsis" title="' + esc(name) + '">' + esc(name) + '</span></span><span class="mstat">' + fmtCompact(st.total) + ' · ' + share.toFixed(0) + '%</span></div>'
               + '<div class="mbar"><span class="mbar-fill" style="width:' + share.toFixed(1) + '%;background:' + col + '"></span></div>'
@@ -923,7 +942,7 @@ export function renderSidebarHtml() {
               + '<div class="row"><span class="row-k">' + L.reqCountLabel + '</span><span class="row-v">' + esc(L.reqsUnit(st.reqs)) + '</span></div>'
               + '<div class="row"><span class="row-k">' + L.cacheHit + '</span><span class="row-v">' + fmtPct(mHit, 1) + '</span></div>'
               + '<div class="row"><span class="row-k">' + L.uncachedIn + ' / ' + L.cachedRead + '</span><span class="row-v">' + fmtCompact(st.uncached) + ' / ' + fmtCompact(st.cached) + '</span></div>'
-              + '<div class="row"><span class="row-k">' + L.uThinkReply + '</span><span class="row-v">' + fmtCompact(st.thinking) + ' / ' + fmtCompact(st.reply) + '</span></div>'
+              + '<div class="row"><span class="row-k">' + L.uThinkReply + '</span><span class="row-v">' + esc(mThinkVal) + '</span></div>'
               + '<div class="row"><span class="row-k">' + L.avgTtft + ' / TPS</span><span class="row-v">' + esc(mTtft != null ? fmtDur(mTtft, isEn) : '—') + ' · ' + esc(fmtTps(mTps)) + '</span></div>'
               + (showCost ? '<div class="row"><span class="row-k">' + L.uCostLabel + '</span><span class="row-v">' + uFmtUsd(mCost.actualUsd) + '</span></div>' : '')
               + '</div></div>';
@@ -943,9 +962,9 @@ export function renderSidebarHtml() {
         + '</div>'
         + '<div class="rows">'
         + '<div class="row"><span class="row-k">' + L.cachedRead + ' / ' + L.uncachedIn + '</span><span class="row-v">' + fmtCompact(selAgg.cached) + ' / ' + fmtCompact(selAgg.uncached) + '</span></div>'
-        + '<div class="row"><span class="row-k">' + L.uThinkReply + '</span><span class="row-v">' + fmtCompact(selAgg.thinking) + ' / ' + fmtCompact(selAgg.reply) + '</span></div>'
+        + '<div class="row"><span class="row-k">' + L.uThinkReply + '</span><span class="row-v">' + esc(summaryThinkVal) + '</span></div>'
         + '<div class="u-think-bar"><span style="width:' + thinkPct.toFixed(1) + '%;background:' + TOKEN_TYPE_COLORS.thinking + '"></span><span style="width:' + replyPct.toFixed(1) + '%;background:' + TOKEN_TYPE_COLORS.reply + '"></span></div>'
-        + '<div style="font-size:11.5px;color:var(--muted-foreground)">' + esc(L.uThinkRatio(Math.round(thinkPct))) + '</div>'
+        + '<div style="font-size:11.5px;color:var(--muted-foreground)">' + esc(summaryThinkNote) + '</div>'
         + (showCost ? '<div class="divider"></div><div class="row"><span class="row-k">' + L.uCostLabel + '</span><span class="row-v">' + uFmtUsd(selCosts.actualUsd) + '</span></div><div class="row"><span class="row-k">' + L.uSavedLabel + '</span><span class="row-v badge-ok">' + uFmtUsd(selCosts.savedUsd) + '</span></div>' : '')
         + '</div></div>'
         + '<div class="card"><div class="card-head"><span class="card-title">' + SVG_GAUGE + '<span>' + L.uModelsTitle + '</span></span><span class="card-val">' + esc(L.modelsCount(selModels.length)) + '</span></div>' + modelsHtml + '</div>'

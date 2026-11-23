@@ -34,7 +34,9 @@ function fieldBytes(fn, buf) {
 }
 
 function tsPb(sec, nano = 0) {
-  return Buffer.concat([fieldVarint(1, sec), fieldVarint(2, nano)]);
+  const sInt = Math.trunc(sec);
+  const nInt = Math.round((sec - sInt) * 1e9) + nano;
+  return Buffer.concat([fieldVarint(1, sInt), fieldVarint(2, nInt)]);
 }
 
 function makeUsage({ uncached = 0, cached = 0, out = 0, think = 0 } = {}) {
@@ -181,7 +183,7 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     assert.equal(res.turns[0].modelSec, 8);
     assert.equal(res.turns[0].toolSec, 6);
     assert.equal(res.turns[0].avgTtftSec, 1.5);
-    assert.equal(res.turns[0].tps, 62.5);
+    assert.equal(res.turns[0].tps, 100);
     assert.equal('_ttftSum' in res.turns[0], false);
     assert.equal(res.turns[1].completed, true);
     assert.equal(res.turns[1].stepsCount, 2);
@@ -189,7 +191,7 @@ test('buildConversationTelemetry parses session, archived turns, error exclusion
     assert.equal(res.turns[1].modelSec, 5);
     assert.equal(res.turns[1].toolSec, 0);
     assert.equal(res.turns[1].avgTtftSec, 3);
-    assert.equal(res.turns[1].tps, 50);
+    assert.equal(res.turns[1].tps, 125);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
@@ -364,7 +366,7 @@ test('buildConversationTelemetry aggregates multi-model turns, nested/compaction
     assert.ok(Math.abs(t0Hydrogen.cacheHitPct - (21000 / 23000) * 100) < 1e-9);
     assert.equal(t0Hydrogen.modelSec, 8);
     assert.equal(t0Hydrogen.avgTtftSec, 2);
-    assert.equal(t0Hydrogen.tps, 50);
+    assert.equal(t0Hydrogen.tps, 100);
     assert.equal('_ttftSum' in t0Hydrogen, false);
 
     const sessHydrogen = snap1.session.modelBreakdown.find(m => m.model === 'Gemini 4 Hydrogen (XHigh)');
@@ -373,7 +375,7 @@ test('buildConversationTelemetry aggregates multi-model turns, nested/compaction
     assert.ok(Math.abs(sessHydrogen.cacheHitPct - (38000 / 43000) * 100) < 1e-9);
     assert.equal(sessHydrogen.modelSec, 11);
     assert.ok(Math.abs(sessHydrogen.avgTtftSec - (5 / 3)) < 1e-9);
-    assert.ok(Math.abs(sessHydrogen.tps - (800 / 11)) < 1e-9);
+    assert.ok(Math.abs(sessHydrogen.tps - (800 / 6)) < 1e-9);
     assert.equal(
       snap1.session.modelBreakdown.reduce((sum, m) => sum + m.total, 0),
       snap1.tokens.total,
@@ -996,6 +998,10 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
 
 test('createUsageStatsCollector splits days cleanly, avoids subagent double counting, computes cost/colors, and invalidates WAL cache', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-usage-test-'));
+  let cDb = null;
+  let mDb = null;
+  let cDb2 = null;
+  let aDb = null;
   try {
     const convDir = join(dir, 'convs');
     mkdirSync(convDir, { recursive: true });
@@ -1024,15 +1030,16 @@ test('createUsageStatsCollector splits days cleanly, avoids subagent double coun
     const mainPath = join(convDir, 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb.db');
     const childPath = join(convDir, `${childId}.db`);
 
-    const cDb = makeDb(childPath);
+    cDb = makeDb(childPath);
     cDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(todaySec), null);
     cDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
       stepIdxs: [0], uncached: 1000, cached: 4000, out: 500, think: 200, ttftSec: 1, streamSec: 2,
       model: 'Gemini 4 Flash', modelId: 'gemini-4-flash',
     }));
     cDb.close();
+    cDb = null;
 
-    const mDb = makeDb(mainPath);
+    mDb = makeDb(mainPath);
     // Yesterday step + invoke_subagent step referencing childId + today step at hour 10
     mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(yestSec), null);
     mDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 132, 3, stepMeta(todaySec), invokePayload(childId));
@@ -1046,6 +1053,7 @@ test('createUsageStatsCollector splits days cleanly, avoids subagent double coun
       model: 'Claude Opus 4.6', modelId: 'claude-opus-4-6',
     }));
     mDb.close();
+    mDb = null;
 
     const collector = createUsageStatsCollector({ convDir, cacheFile });
     const s1 = collector.readStats({ nowMs: todayMs });
@@ -1068,7 +1076,7 @@ test('createUsageStatsCollector splits days cleanly, avoids subagent double coun
     assert.equal(Object.keys(persisted.files).length, 2);
 
     // Modify child WAL (keep open to keep -wal file non-empty) and verify WAL invalidation
-    const cDb2 = new DatabaseSync(childPath);
+    cDb2 = new DatabaseSync(childPath);
     cDb2.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 15, 3, stepMeta(todaySec + 3600), null);
     cDb2.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(1, makeGen({
       stepIdxs: [1], uncached: 500, cached: 1500, out: 200, think: 50, ttftSec: 1, streamSec: 1,
@@ -1078,6 +1086,7 @@ test('createUsageStatsCollector splits days cleanly, avoids subagent double coun
     assert.equal(s2.days[todayYmd].total, 18500);
     assert.equal(s2.todayHours[11].total, 2200);
     cDb2.close();
+    cDb2 = null;
 
     // Cost estimation & collision-free model-family colors
     const opusCost = estimateModelCost('Claude Opus 4.6', 1_000_000, 1_000_000, 100_000);
@@ -1116,7 +1125,51 @@ test('createUsageStatsCollector splits days cleanly, avoids subagent double coun
     } finally {
       await asyncCollector.close();
     }
+
+    // Pure-streaming TPS + Claude unsplit thinkingTrackedOutput + deleted-DB archive retention
+    const archPath = join(convDir, 'cccccccc-3333-4333-8333-cccccccccccc.db');
+    aDb = makeDb(archPath);
+    aDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 15, 3, stepMeta(todaySec), null);
+    aDb.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 15, 3, stepMeta(todaySec), null);
+    aDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(0, makeGen({
+      stepIdxs: [0], uncached: 100, cached: 900, out: 120, think: 0, ttftSec: 2, streamSec: 0,
+      model: 'Claude Opus 5.5 (High)', modelId: 'claude-opus-5-5',
+    }));
+    aDb.prepare('INSERT INTO gen_metadata VALUES (?, ?)').run(1, makeGen({
+      stepIdxs: [1], uncached: 100, cached: 900, out: 240, think: 40, ttftSec: 1.5, streamSec: 2.5,
+      model: 'Gemini 4 Neon', modelId: 'gemini-4-neon',
+    }));
+    aDb.close();
+    aDb = null;
+
+    const s3 = createUsageStatsCollector({ convDir, cacheFile }).readStats({ nowMs: todayMs });
+    const claudeStat = s3.days[todayYmd].byModel['Claude Opus 5.5 (High)'];
+    const neonStat = s3.days[todayYmd].byModel['Gemini 4 Neon'];
+    // Unsplit Claude (think=0): excluded from thinkingTrackedOutput; streamSec=0 excluded from timedOutput/timedModelSec
+    assert.equal(claudeStat.thinkingTrackedOutput, 0);
+    assert.equal(claudeStat.timedOutput, 0);
+    assert.equal(claudeStat.timedModelSec, 0);
+    // Gemini timedModelSec uses pure streaming duration (2.5), excluding TTFT (1.5)
+    assert.equal(neonStat.thinkingTrackedOutput, 240);
+    assert.equal(neonStat.timedOutput, 240);
+    assert.ok(Math.abs(neonStat.timedModelSec - 2.5) < 1e-6);
+
+    // Delete archPath from disk: normal refresh preserves archived history; forceRefresh clears stale deleted DB
+    rmSync(archPath, { force: true });
+    rmSync(`${archPath}-wal`, { force: true });
+    rmSync(`${archPath}-shm`, { force: true });
+    const sArch = createUsageStatsCollector({ convDir, cacheFile }).readStats({ nowMs: todayMs });
+    assert.equal(sArch.days[todayYmd].byModel['Gemini 4 Neon'].total, 1240);
+    assert.equal(sArch.days[todayYmd].total, 18500 + 1120 + 1240);
+
+    const sForce = createUsageStatsCollector({ convDir, cacheFile }).readStats({ nowMs: todayMs, forceRefresh: true });
+    assert.equal(sForce.days[todayYmd].byModel['Gemini 4 Neon'], undefined);
+    assert.equal(sForce.days[todayYmd].total, 18500);
   } finally {
+    try { cDb?.close(); } catch {}
+    try { mDb?.close(); } catch {}
+    try { cDb2?.close(); } catch {}
+    try { aDb?.close(); } catch {}
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

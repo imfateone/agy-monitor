@@ -159,6 +159,7 @@ function installRuntime(ownerTs, codeHash) {
       cachedRead: '缓存读取',
       output: '输出',
       ctxTitle: '上下文已用',
+      ctxEstNote: '总占用为服务端实测，分类拆解为客户端估算',
       turnPill: (tok) => `用量 ${tok} tok`,
       turnTitle: '本轮用量',
       modelLabel: '提供方 / 模型',
@@ -192,6 +193,7 @@ function installRuntime(ownerTs, codeHash) {
       cachedRead: 'Cache read',
       output: 'Output',
       ctxTitle: 'Context used',
+      ctxEstNote: 'Total is server-reported; breakdown is client-estimated',
       turnPill: (tok) => `${tok} tok`,
       turnTitle: 'Turn Usage',
       modelLabel: 'Provider / Model',
@@ -678,7 +680,8 @@ function installRuntime(ownerTs, codeHash) {
         <span class="agm-ctx-frac">~${fmtCompact(used)} / ${max > 0 ? fmtCompact(max) : '--'}</span>
       </div>
       <div class="agm-bar">${segs}</div>
-      <div class="agm-rows">${rows}</div>`;
+      <div class="agm-rows">${rows}</div>
+      ${cats.length > 0 ? `<div style="font-size:10.5px;color:var(--muted-foreground, light-dark(#71717a, #a1a1aa));margin-top:6px;line-height:1.35">${esc(L.ctxEstNote)}</div>` : ''}`;
   }
 
   function buildTurnCardHtml(turn, prefs, subTab = 'summary') {
