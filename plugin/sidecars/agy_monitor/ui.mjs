@@ -87,6 +87,13 @@ export function renderSidebarHtml() {
     }
     .badge-ok { color: #16a34a; font-weight: 600; }
     .badge-warn { color: #d97706; font-weight: 600; }
+    .q-pills { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .q-pill { display: inline-flex; align-items: baseline; gap: 3px; white-space: nowrap; }
+    .q-lbl { font-size: 11px; color: var(--muted-foreground, light-dark(#71717a, #a1a1aa)); font-weight: 500; }
+    .q-pct { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .q-pct.warn { color: #d97706; }
+    .q-pct.danger { color: #ef4444; }
+    .q-sep { color: var(--muted-foreground, light-dark(#a1a1aa, #52525b)); font-size: 11px; }
     .setting-row {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
       padding: 9px 0; border-bottom: 1px solid var(--border, light-dark(rgba(0,0,0,0.06), rgba(255,255,255,0.07)));
@@ -369,6 +376,59 @@ export function renderSidebarHtml() {
       }).join('') + '</div>';
     }
 
+    function fmtQuotaReset(iso, isEn) {
+      if (!iso) return '';
+      const ms = Date.parse(iso);
+      if (!Number.isFinite(ms)) return String(iso);
+      const dt = new Date(ms);
+      const pad = (n) => String(n).padStart(2, '0');
+      const clock = pad(dt.getHours()) + ':' + pad(dt.getMinutes());
+      const dateStr = pad(dt.getMonth() + 1) + '-' + pad(dt.getDate()) + ' ' + clock;
+      const diff = (ms - Date.now()) / 1000;
+      if (diff <= 0) return isEn ? 'Resetting (' + clock + ')' : '刚刚重置 (' + clock + ')';
+      const days = Math.floor(diff / 86400);
+      const hrs = Math.floor((diff % 86400) / 3600);
+      const mins = Math.floor((diff % 3600) / 60);
+      if (days > 0) return isEn ? days + 'd ' + hrs + 'h (' + dateStr + ')' : days + '天' + hrs + '小时后 (' + dateStr + ')';
+      if (hrs > 0) return isEn ? hrs + 'h ' + mins + 'm (' + clock + ')' : hrs + '小时' + mins + '分后 (' + clock + ')';
+      return isEn ? Math.max(1, mins) + 'm (' + clock + ')' : Math.max(1, mins) + '分钟后 (' + clock + ')';
+    }
+
+    function parseQuotaBuckets(rawBuckets, isEn) {
+      const list = [];
+      for (const b of (Array.isArray(rawBuckets) ? rawBuckets : [])) {
+        if (!b || typeof b !== 'object') continue;
+        const hasFrac = b.remainingFraction !== undefined && b.remainingFraction !== null;
+        if (!hasFrac && !b.resetTime) continue;
+        const frac = hasFrac ? Number(b.remainingFraction) : 0;
+        if (!Number.isFinite(frac)) continue;
+        const pct = Math.round(Math.max(0, Math.min(100, frac * 100)) * 10) / 10;
+        const pctStr = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+        const w = String(b.window || '').toLowerCase();
+        const bid = String(b.bucketId || '').toLowerCase();
+        const disp = String(b.displayName || '').toLowerCase();
+        let rank = 2;
+        let lbl = b.displayName || '';
+        if (w === '5h' || bid.includes('5h') || disp.includes('five hour') || disp.includes('5-hour')) {
+          rank = 0; lbl = '5h';
+        } else if (w === 'weekly' || bid.includes('week') || disp.includes('weekly')) {
+          rank = 1; lbl = isEn ? 'Wk' : '周';
+        } else if (w === 'daily' || bid.includes('daily') || disp.includes('daily')) {
+          rank = 1; lbl = isEn ? 'Day' : '日';
+        }
+        list.push({
+          rank,
+          bid,
+          lbl,
+          pct,
+          pctStr,
+          reset: fmtQuotaReset(b.resetTime, isEn),
+        });
+      }
+      list.sort((a, b) => a.rank - b.rank || a.bid.localeCompare(b.bid));
+      return list;
+    }
+
     function render(d, force = false) {
       lastData = d;
       const isEn = d.prefs?.language === 'en';
@@ -400,8 +460,17 @@ export function renderSidebarHtml() {
       let quotaHtml = '';
       if (d.prefs?.showQuotaInSidebar !== false && Array.isArray(d.quotaGroups) && d.quotaGroups.length > 0 && !d.cloudPaygo) {
         const qRows = d.quotaGroups.map(g => {
-          const buckets = (g.buckets || []).map(b => Math.round((b.remainingFraction || 0) * 100) + '%').join(' / ');
-          return '<div class="row"><span class="row-k">' + esc(g.displayName || g.label || 'Pool') + '</span><span class="row-v">' + esc(buckets || '—') + '</span></div>';
+          const parsed = parseQuotaBuckets(g.buckets, isEn);
+          const pills = parsed.map((b, idx) => {
+            const tone = b.pct <= 15 ? ' danger' : (b.pct <= 35 ? ' warn' : '');
+            const bTip = (b.lbl ? b.lbl + ' ' : '') + b.pctStr + '%' + (b.reset ? ' · ' + b.reset : '');
+            const sep = idx > 0 ? '<span class="q-sep">·</span>' : '';
+            return sep + '<span class="q-pill" title="' + esc(bTip) + '">' + (b.lbl ? '<span class="q-lbl">' + esc(b.lbl) + '</span>' : '') + '<span class="q-pct' + tone + '">' + esc(b.pctStr) + '%</span></span>';
+          }).join('');
+          const rowTips = [];
+          if (g.description) rowTips.push(g.description);
+          parsed.forEach(b => rowTips.push((b.lbl ? b.lbl + ': ' : '') + b.pctStr + '%' + (b.reset ? ' (' + b.reset + ')' : '')));
+          return '<div class="row" title="' + esc(rowTips.join('\\n')) + '"><span class="row-k">' + esc(g.displayName || g.label || 'Pool') + '</span><span class="row-v" style="max-width:none"><span class="q-pills">' + (pills || '—') + '</span></span></div>';
         }).join('');
         quotaHtml = '<div class="card"><div class="card-head"><span class="card-title">' + SVG_CTX + '<span>' + L.quotaTitle + '</span></span></div><div class="rows">' + qRows + '</div></div>';
       }
@@ -436,7 +505,8 @@ export function renderSidebarHtml() {
         subagentsHtml = '<div class="card"><div class="card-head"><span class="card-title">' + SVG_GAUGE + '<span>' + L.subagentDetailTitle + '</span></span><span class="card-val">' + esc(L.subagentCountUnit(d.subagents.length)) + ' · ' + fmtCompact(t.subagentTotal || 0) + ' tok</span></div><div class="rows">' + saRows + '</div></div>';
       }
 
-      const summaryCardsHtml = '<div class="card"><div class="card-head"><span class="card-title">' + SVG_GAUGE + '<span>' + L.sessionTitle + '</span></span><span class="card-val">' + esc(L.turnsSteps(s.turnsCount || 0, s.stepsCount || 0)) + '</span></div><div class="rows">'
+      const summaryCardsHtml = quotaHtml
+        + '<div class="card"><div class="card-head"><span class="card-title">' + SVG_GAUGE + '<span>' + L.sessionTitle + '</span></span><span class="card-val">' + esc(L.turnsSteps(s.turnsCount || 0, s.stepsCount || 0)) + '</span></div><div class="rows">'
         + '<div class="row"><span class="row-k">' + L.modelTime + '</span><span class="row-v">' + esc(fmtDur(s.modelSec, isEn)) + '</span></div>'
         + '<div class="row"><span class="row-k">' + L.toolTime + '</span><span class="row-v">' + esc(fmtDur(s.toolSec, isEn)) + '</span></div>'
         + '<div class="row"><span class="row-k">' + L.avgTtft + '</span><span class="row-v">' + esc(s.avgTtftSec != null ? fmtDur(s.avgTtftSec, isEn) : '—') + '</span></div>'
@@ -456,8 +526,7 @@ export function renderSidebarHtml() {
         + '<div class="bar">' + segs + '</div><div class="rows">' + catRows + '</div>'
         + (cats.length > 0 ? '<div style="font-size:11px;color:var(--muted-foreground);margin-top:6px;line-height:1.4">' + esc(L.ctxEstNote) + '</div>' : '')
         + '</div>'
-        + subagentsHtml
-        + quotaHtml;
+        + subagentsHtml;
 
       const modelCardsHtml = sessionModels.length === 0
         ? '<div class="empty">' + L.emptyModels + '</div>'

@@ -987,6 +987,9 @@ test('runtime bundle and sidebar HTML compile cleanly and mount outside composer
   assert.ok(html.includes('turn.toolSec'));
   assert.ok(html.includes('turn.avgTtftSec'));
   assert.ok(html.includes('turn.tps'));
+  assert.ok(html.includes('parseQuotaBuckets'));
+  assert.ok(html.includes('fmtQuotaReset'));
+  assert.ok(html.includes('q-pills'));
   const scriptBody = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
   assert.ok(scriptBody);
   new vm.Script(scriptBody);

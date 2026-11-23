@@ -39,6 +39,7 @@ async function fetchQuota() {
         const groups = data?.response?.groups ?? data?.groups;
         const quotaGroups = Array.isArray(groups) ? groups.map(g => ({
           displayName: g.displayName || g.label || '',
+          description: g.description || '',
           buckets: Array.isArray(g.buckets) ? g.buckets : [],
         })) : [];
         let cloudPaygo = false;
