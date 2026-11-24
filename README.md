@@ -66,31 +66,32 @@ cd agy-monitor
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-默认安装只处理插件文件（`install.ps1` 适用于 Windows）。脚本将插件安装或更新到 `%USERPROFILE%\.gemini\config\plugins\agy-monitor`，备份旧版至 `./backups/`，并运行 `node --test` 验证插件。安装后请完全退出 Antigravity，再从原有入口启动，即可使用右侧 AGY监控 面板。
+默认安装（`install.ps1` 适用于 Windows）会自动完成以下步骤：
+1. 将插件安装/更新到 `%USERPROFILE%\.gemini\config\plugins\agy-monitor`（若已有旧版，自动备份至 `./backups/`）；
+2. 运行 `node --test` 单元测试验证插件可用；
+3. 仅针对当前用户桌面、开始菜单、任务栏中**直接指向 `Antigravity.exe`** 的快捷方式，原地追加 `--remote-debugging-port=0` 以启用底部监控栏和每轮用量胶囊：
+   - 修改前自动备份原 `.lnk` 至 `./backups/`；
+   - **完整保留原有代理等其他参数、已有有效调试端口、图标和工作目录等设置**；
+   - 若原入口为自定义代理脚本/启动器（非 `Antigravity.exe`），**保持原样不修改**，并提示透传方法。
 
-> **macOS / Linux**：将 `./plugin` 复制到 `~/.gemini/config/plugins/agy-monitor`，运行 `node --test ~/.gemini/config/plugins/agy-monitor/test/telemetry.test.mjs` 验证后，完全退出并重启 Antigravity 即可。
+> 安装完成后，请**完全退出并重新启动 Antigravity**，即可同时使用右侧 AGY监控 面板与底部/每轮用量胶囊。
+>
+> **macOS / Linux**：将 `./plugin` 复制到 `~/.gemini/config/plugins/agy-monitor`，运行 `node --test ~/.gemini/config/plugins/agy-monitor/test/telemetry.test.mjs` 验证后完全重启 Antigravity；如需底部监控栏和每轮用量胶囊，请在启动命令中传入 `--remote-debugging-port=0`。
 
-### 3. 可选启用底部监控栏和每轮用量胶囊
+### 3. 自定义启动入口与高级安装选项
 
-只使用右侧面板时，可以跳过这一步。
-
-#### 沿用现有快捷方式
-
-1. 右键平时用来启动 Antigravity 的快捷方式，打开「属性」。
-2. 在「目标」栏原有命令末尾加一个空格，再加 `--remote-debugging-port=0`。如果程序路径带引号，把参数放在引号外。如果已有这项参数，把它改为 `--remote-debugging-port=0`，保留其他参数。
-3. 完全退出 Antigravity，再用该快捷方式重新启动。
-
-如果平时通过自定义脚本启动，请让原有脚本把 `--remote-debugging-port=0` 传给 Antigravity。
-
-#### 由安装器创建独立快捷方式
-
-直启 Antigravity 的用户如果想另建一个监控入口，可在安装时显式加上 `-CreateMonitorShortcut`。
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -CreateMonitorShortcut
-```
-
-安装器会保留已有快捷方式，并在桌面创建 `Antigravity (AGY Monitor)`。完全退出 Antigravity 后，通过该入口启动即可显示页面监控。
+- **不想改动任何快捷方式（仅装右侧面板，或自行管理启动参数）**：
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -NoShortcut
+  ```
+- **保留原有快捷方式，另建桌面独立监控入口（系统级公共桌面安装时也适用）**：
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -CreateMonitorShortcut
+  ```
+  安装器不修改已有快捷方式，并在当前用户桌面新建 `Antigravity (AGY Monitor)`。
+- **使用自定义代理脚本 / 手动配置原入口**：
+  - 若通过自定义脚本启动，请让原脚本把 `--remote-debugging-port=0` 透传给 `Antigravity.exe`；
+  - 若手动修改快捷方式：右键快捷方式 →「属性」→ 在「目标」栏末尾加一个空格再加 `--remote-debugging-port=0`（程序路径带引号时放在引号外，保留原有其他参数）→ 完全退出并重启 Antigravity。
 
 ---
 

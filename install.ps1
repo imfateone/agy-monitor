@@ -1,8 +1,21 @@
 ﻿# 一键安装 / 更新 AGY监控 插件
 [CmdletBinding()]
-param([switch]$CreateMonitorShortcut)
+param(
+    [switch]$NoShortcut,
+    [switch]$CreateMonitorShortcut
+)
 
 $ErrorActionPreference = "Stop"
+
+function Test-HasValidRemoteDebuggingPortArg {
+    param([string]$Arguments)
+
+    if (-not $Arguments) { return $false }
+    $m = [regex]::Match($Arguments, '(?i)(?:^|[\s"''])--remote-debugging-port(?:=|\s+)(\d{1,5})(?=$|[\s"''])')
+    if (-not $m.Success) { return $false }
+    $port = [int]$m.Groups[1].Value
+    return ($port -ge 0 -and $port -le 65535)
+}
 
 function Set-RemoteDebuggingPortArg {
     param([string]$Arguments)
@@ -13,6 +26,124 @@ function Set-RemoteDebuggingPortArg {
         return ([regex]::Replace($argsText, $pattern, '$1--remote-debugging-port=0')).Trim()
     }
     return "$argsText --remote-debugging-port=0".TrimStart()
+}
+
+function Enable-AntigravityCdpShortcuts {
+    param(
+        [string[]]$UserSearchRoots,
+        [string[]]$ReadOnlyFallbackRoots = @(),
+        [string]$BackupsRoot
+    )
+
+    $shell = New-Object -ComObject WScript.Shell
+    $seenRoots = @{}
+    $roots = @()
+    foreach ($root in @($UserSearchRoots)) {
+        if (-not $root) { continue }
+        $key = $root.TrimEnd('\').ToLowerInvariant()
+        if ($seenRoots.ContainsKey($key)) { continue }
+        if (Test-Path -LiteralPath $root -PathType Container) {
+            $seenRoots[$key] = $true
+            $roots += $root
+        }
+    }
+
+    $patchedCount = 0
+    $alreadyCount = 0
+    $customLaunchers = @()
+    $shortcutBackupDir = $null
+    $backupSeq = 0
+
+    foreach ($root in $roots) {
+        foreach ($file in Get-ChildItem -LiteralPath $root -Filter "*.lnk" -File -Recurse -ErrorAction SilentlyContinue) {
+            try {
+                $lnk = $shell.CreateShortcut($file.FullName)
+                $isDirectTarget = ([IO.Path]::GetFileName($lnk.TargetPath) -ieq "Antigravity.exe")
+                if ($isDirectTarget) {
+                    if (-not (Test-Path -LiteralPath $lnk.TargetPath -PathType Leaf)) { continue }
+                    $oldArgs = if ($null -eq $lnk.Arguments) { "" } else { [string]$lnk.Arguments }
+                    if (Test-HasValidRemoteDebuggingPortArg -Arguments $oldArgs) {
+                        Write-Host "    快捷方式已配置调试端口（保持原样）: $($file.FullName)" -ForegroundColor DarkGray
+                        $alreadyCount += 1
+                        continue
+                    }
+
+                    $newArgs = Set-RemoteDebuggingPortArg -Arguments $oldArgs
+                    if ($BackupsRoot) {
+                        if (-not $shortcutBackupDir) {
+                            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+                            $shortcutBackupDir = Join-Path $BackupsRoot "shortcuts-$stamp"
+                            New-Item -ItemType Directory -Path $shortcutBackupDir -Force | Out-Null
+                        }
+                        $backupSeq += 1
+                        $backupFile = Join-Path $shortcutBackupDir ("{0:D2}-{1}" -f $backupSeq, $file.Name)
+                        Copy-Item -LiteralPath $file.FullName -Destination $backupFile -Force
+                    }
+
+                    # 仅追加/修复调试端口参数，其余原有参数与属性全部保持原样
+                    $lnk.Arguments = $newArgs
+                    $lnk.Save()
+                    Write-Host "    已为快捷方式追加 --remote-debugging-port=0: $($file.FullName)" -ForegroundColor Cyan
+                    $patchedCount += 1
+                } elseif ($file.Name -ieq "Antigravity.lnk") {
+                    $customLaunchers += [PSCustomObject]@{
+                        Path = $file.FullName
+                        HasCdp = (Test-HasValidRemoteDebuggingPortArg -Arguments $lnk.Arguments)
+                    }
+                }
+            } catch {
+                Write-Warning "检查或更新快捷方式失败 ($($file.FullName)): $_"
+            }
+        }
+    }
+
+    if ($shortcutBackupDir) {
+        Write-Host "    已备份修改前的快捷方式至: $shortcutBackupDir" -ForegroundColor DarkGray
+        Get-ChildItem -Path $BackupsRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^shortcuts-\d{8}-\d{6}$' } |
+            Sort-Object Name -Descending |
+            Select-Object -Skip 5 |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    foreach ($custom in $customLaunchers) {
+        if ($custom.HasCdp) {
+            Write-Host "    检测到自定义 Antigravity 启动入口且已含调试端口（保持原样）: $($custom.Path)" -ForegroundColor DarkGray
+        } else {
+            Write-Warning "检测到自定义 Antigravity 启动入口，已保持原样未修改: $($custom.Path)。如需底部监控栏和每轮用量胶囊，请在原启动脚本中把 --remote-debugging-port=0 透传给 Antigravity。"
+        }
+    }
+
+    if ($patchedCount -eq 0 -and $alreadyCount -eq 0 -and $customLaunchers.Count -eq 0) {
+        $foundPublic = $false
+        foreach ($pubRoot in @($ReadOnlyFallbackRoots)) {
+            if (-not $pubRoot -or -not (Test-Path -LiteralPath $pubRoot -PathType Container)) { continue }
+            $pubKey = $pubRoot.TrimEnd('\').ToLowerInvariant()
+            if ($seenRoots.ContainsKey($pubKey)) { continue }
+            foreach ($file in Get-ChildItem -LiteralPath $pubRoot -Filter "*.lnk" -File -Recurse -ErrorAction SilentlyContinue) {
+                try {
+                    $lnk = $shell.CreateShortcut($file.FullName)
+                    if ([IO.Path]::GetFileName($lnk.TargetPath) -ieq "Antigravity.exe") {
+                        $foundPublic = $true
+                        break
+                    }
+                } catch {}
+            }
+            if ($foundPublic) { break }
+        }
+        if ($foundPublic) {
+            Write-Warning "仅在公共桌面/公共开始菜单发现 Antigravity 快捷方式（未改动系统公共目录）。如需底部监控栏和每轮用量胶囊，可运行 .\install.ps1 -CreateMonitorShortcut 在当前用户桌面新建独立入口，或在快捷方式目标末尾手动加上 --remote-debugging-port=0。"
+        } else {
+            Write-Warning "未在当前用户桌面、开始菜单或任务栏找到指向 Antigravity.exe 的快捷方式。如需底部监控栏和每轮用量胶囊，请在启动入口加入 --remote-debugging-port=0，或运行 .\install.ps1 -CreateMonitorShortcut 创建桌面独立入口。"
+        }
+    }
+
+    return [PSCustomObject]@{
+        PatchedCount = $patchedCount
+        AlreadyCount = $alreadyCount
+        CustomCount  = $customLaunchers.Count
+        BackupDir    = $shortcutBackupDir
+    }
 }
 
 function New-PageMonitorShortcut {
@@ -76,7 +207,7 @@ function New-PageMonitorShortcut {
     }
 
     if ($primaryLink -and $primaryIsCustom) {
-        if ($primaryLink.Arguments -match '(?:^|[\s"''])--remote-debugging-port=0(?=$|[\s"''])') {
+        if (Test-HasValidRemoteDebuggingPortArg -Arguments $primaryLink.Arguments) {
             Write-Host "现有 Antigravity 启动入口已配置页面监控，请沿用该入口。" -ForegroundColor Cyan
         } else {
             Write-Warning "请沿用自定义 Antigravity 启动入口，由该入口透传 --remote-debugging-port=0 来启用页面监控。"
@@ -163,6 +294,8 @@ function New-PageMonitorShortcut {
     }
 }
 
+$totalSteps = if ($NoShortcut) { 3 } else { 4 }
+
 Write-Host "=== AGY监控 一键安装与更新 ===" -ForegroundColor Cyan
 
 # 1. 检测 Node.js（Antigravity sidecar 运行依赖）
@@ -184,7 +317,7 @@ if (-not $nodeCmd) {
     throw "未检测到 Node.js，请先安装 Node.js 22.13+ LTS (https://nodejs.org/) 并确保 node 在 PATH 中后再运行本脚本。"
 }
 $nodeVerStr = (& node --version).Trim()
-Write-Host "[1/3] Node.js 就绪: $nodeVerStr" -ForegroundColor Green
+Write-Host "[1/$totalSteps] Node.js 就绪: $nodeVerStr" -ForegroundColor Green
 if ($nodeVerStr -match '^v(\d+)\.(\d+)\.(\d+)') {
     $nodeVer = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
     if ($nodeVer -lt [version]"22.13.0") {
@@ -207,7 +340,7 @@ if (Test-Path $liveDir) {
     if ($LASTEXITCODE -ge 8) {
         throw "备份原有插件失败，退出码: $LASTEXITCODE"
     }
-    Write-Host "[2/3] 已备份原有插件至: $backupDir" -ForegroundColor DarkGray
+    Write-Host "[2/$totalSteps] 已备份原有插件至: $backupDir" -ForegroundColor DarkGray
     Get-ChildItem -Path $backupsRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d{8}-\d{6}$' } |
         Sort-Object Name -Descending |
@@ -220,27 +353,43 @@ robocopy $srcDir $liveDir /MIR /XD node_modules __pycache__ backups | Out-Null
 if ($LASTEXITCODE -ge 8) {
     throw "同步插件文件失败，退出码: $LASTEXITCODE"
 }
-Write-Host "[2/3] 插件已安装/更新至: $liveDir" -ForegroundColor Green
+Write-Host "[2/$totalSteps] 插件已安装/更新至: $liveDir" -ForegroundColor Green
 
 # 3. 运行单元测试验证插件健康状态
 $testFile = Join-Path $liveDir "test\telemetry.test.mjs"
 if (Test-Path $testFile) {
-    Write-Host "[3/3] 正在运行单元测试..." -ForegroundColor Cyan
+    Write-Host "[3/$totalSteps] 正在运行单元测试..." -ForegroundColor Cyan
     & node --test $testFile
     if ($LASTEXITCODE -ne 0) {
         throw "单元测试失败，退出码: $LASTEXITCODE"
     }
 }
 
-if ($CreateMonitorShortcut) {
+# 4. 配置页面监控所需的调试端口参数（仅在需要时处理，不破坏原有参数与自定义启动器）
+if (-not $NoShortcut) {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
     $startMenuPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
-    $extraRoots = @(
+    $taskBarPath = Join-Path $env:APPDATA "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
+    $publicRoots = @(
         [Environment]::GetFolderPath("CommonDesktopDirectory"),
         [Environment]::GetFolderPath("CommonPrograms")
     )
-    New-PageMonitorShortcut -Desktop $desktopPath -StartMenu $startMenuPath -ExtraSearchRoots $extraRoots
+    if ($CreateMonitorShortcut) {
+        Write-Host "[4/$totalSteps] 正在创建独立的页面监控快捷方式..." -ForegroundColor Cyan
+        New-PageMonitorShortcut -Desktop $desktopPath -StartMenu $startMenuPath -ExtraSearchRoots $publicRoots
+    } else {
+        Write-Host "[4/$totalSteps] 正在检查并配置 Antigravity 快捷方式调试端口..." -ForegroundColor Cyan
+        $res = Enable-AntigravityCdpShortcuts `
+            -UserSearchRoots @($desktopPath, $startMenuPath, $taskBarPath) `
+            -ReadOnlyFallbackRoots $publicRoots `
+            -BackupsRoot $backupsRoot
+        Write-Host "[4/$totalSteps] 快捷方式检查完成（本次追加 $($res.PatchedCount) 个，已配置 $($res.AlreadyCount) 个）" -ForegroundColor Green
+    }
 }
 
 Write-Host ""
-Write-Host "安装完成！请完全退出并重新启动 Antigravity，即可使用 AGY监控。" -ForegroundColor Yellow
+if ($NoShortcut) {
+    Write-Host "安装完成！请完全退出并重新启动 Antigravity，即可使用右侧 AGY监控 面板。" -ForegroundColor Yellow
+} else {
+    Write-Host "安装完成！请完全退出并重新启动 Antigravity，即可使用右侧 AGY监控 面板与底部/每轮用量胶囊。" -ForegroundColor Yellow
+}
