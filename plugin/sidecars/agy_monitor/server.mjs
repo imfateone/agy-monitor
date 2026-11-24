@@ -2,7 +2,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installEpipeGuard } from './host_bridge.mjs';
+import { ensureLoopbackNoProxy, installEpipeGuard } from './host_bridge.mjs';
 import { startMonitorInjector } from './injector.mjs';
 import { startSelfReloadWatcher } from './reload.mjs';
 import { createSettingsStore } from './settings.mjs';
@@ -15,48 +15,57 @@ const settingsStore = createSettingsStore();
 const snapshotCache = createSnapshotCache(buildConversationTelemetry);
 const usageStatsCollector = createAsyncUsageStatsCollector({ convDir: CONV_DIR });
 
-let cachedQuota = { quotaGroups: [], cloudPaygo: false };
-let lastQuotaAt = 0;
-let quotaInFlight = null;
+export function createQuotaFetcher() {
+  let cachedQuota = { quotaGroups: [], cloudPaygo: false };
+  let lastQuotaAt = 0;
+  let quotaInFlight = null;
 
-async function fetchQuota() {
-  if (Date.now() - lastQuotaAt < 10000) return cachedQuota;
-  if (quotaInFlight) return quotaInFlight;
-  quotaInFlight = (async () => {
-    const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
-    const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
-    if (!lsAddr || !csrf) return cachedQuota;
-    const call = method => fetch(`http://${lsAddr}/exa.language_server_pb.LanguageServerService/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-codeium-csrf-token': csrf },
-      body: '{}',
-      signal: AbortSignal.timeout(3000),
-    });
-    try {
-      const res = await call('RetrieveUserQuotaSummary');
-      if (res.ok) {
-        const data = await res.json();
-        const groups = data?.response?.groups ?? data?.groups;
-        const quotaGroups = Array.isArray(groups) ? groups.map(g => ({
-          displayName: g.displayName || g.label || '',
-          description: g.description || '',
-          buckets: Array.isArray(g.buckets) ? g.buckets : [],
-        })) : [];
-        let cloudPaygo = false;
-        if (quotaGroups.length === 0) {
-          try {
-            const st = await call('GetUserStatus');
-            if (st.ok) cloudPaygo = (await st.json())?.userStatus?.userTier?.id === 'agy-business-paygo-tier';
-          } catch {}
+  return async function fetchQuota() {
+    if (Date.now() - lastQuotaAt < 10000) return cachedQuota;
+    if (quotaInFlight) return quotaInFlight;
+    quotaInFlight = (async () => {
+      const rawAddr = String(process.env.ANTIGRAVITY_LS_ADDRESS || '').trim();
+      const lsUrl = rawAddr ? URL.parse(`http://${rawAddr}`) : null;
+      const lsPort = Number(lsUrl?.port);
+      const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
+      if (
+        !csrf || !lsUrl || !['127.0.0.1', '[::1]', 'localhost'].includes(lsUrl.hostname)
+        || !lsUrl.port || !Number.isInteger(lsPort) || lsPort < 1 || lsPort > 65535
+        || lsUrl.username || lsUrl.password || lsUrl.pathname !== '/' || lsUrl.search || lsUrl.hash
+      ) return cachedQuota;
+      const call = method => fetch(new URL(`/exa.language_server_pb.LanguageServerService/${method}`, lsUrl), {
+        method: 'POST',
+        redirect: 'error',
+        headers: { 'Content-Type': 'application/json', 'x-codeium-csrf-token': csrf },
+        body: '{}',
+        signal: AbortSignal.timeout(3000),
+      });
+      try {
+        const res = await call('RetrieveUserQuotaSummary');
+        if (res.ok) {
+          const data = await res.json();
+          const groups = data?.response?.groups ?? data?.groups;
+          const quotaGroups = Array.isArray(groups) ? groups.map(g => ({
+            displayName: g.displayName || g.label || '',
+            description: g.description || '',
+            buckets: Array.isArray(g.buckets) ? g.buckets : [],
+          })) : [];
+          let cloudPaygo = false;
+          if (quotaGroups.length === 0) {
+            try {
+              const st = await call('GetUserStatus');
+              if (st.ok) cloudPaygo = (await st.json())?.userStatus?.userTier?.id === 'agy-business-paygo-tier';
+            } catch {}
+          }
+          cachedQuota = { quotaGroups, cloudPaygo };
+          lastQuotaAt = Date.now();
         }
-        cachedQuota = { quotaGroups, cloudPaygo };
-        lastQuotaAt = Date.now();
-      }
-    } catch {}
-    return cachedQuota;
-  })();
-  try { return await quotaInFlight; }
-  finally { quotaInFlight = null; }
+      } catch {}
+      return cachedQuota;
+    })();
+    try { return await quotaInFlight; }
+    finally { quotaInFlight = null; }
+  };
 }
 
 export const EMPTY_DATA = Object.freeze({
@@ -91,7 +100,7 @@ export function createTelemetryController({
   convDir = CONV_DIR,
   readSnapshot = (p) => snapshotCache.read(p),
   resolveLatest = (d) => resolveLatestConversationId(d),
-  getQuota = fetchQuota,
+  getQuota = createQuotaFetcher(),
   readSettings = () => settingsStore.read(),
 } = {}) {
   let lastDeckConvId = '';
@@ -135,7 +144,10 @@ const isMain = (() => {
   }
 })();
 
-if (isMain) installEpipeGuard();
+if (isMain) {
+  ensureLoopbackNoProxy();
+  installEpipeGuard();
+}
 
 let injector = null;
 if (isMain && process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) {

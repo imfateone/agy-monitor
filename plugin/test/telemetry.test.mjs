@@ -8,9 +8,10 @@ import { join } from 'node:path';
 import { fmtCompact, fmtDur, fmtExact, fmtPct, fmtTps, esc } from '../sidecars/agy_monitor/pb.mjs';
 import { buildConversationTelemetry, createSnapshotCache, mergeIntervalsSec, parseGenRow } from '../sidecars/agy_monitor/telemetry.mjs';
 import { normalizeSettings, createSettingsStore } from '../sidecars/agy_monitor/settings.mjs';
-import { buildRuntimeBundle, matchTurnBarsToCompleted, parseRelativeAgeMs } from '../sidecars/agy_monitor/injector.mjs';
+import { buildRuntimeBundle, matchTurnBarsToCompleted, parseRelativeAgeMs, startMonitorInjector } from '../sidecars/agy_monitor/injector.mjs';
 import { renderSidebarHtml } from '../sidecars/agy_monitor/ui.mjs';
 import { createTelemetryController, EMPTY_DATA } from '../sidecars/agy_monitor/server.mjs';
+import { ensureLoopbackNoProxy } from '../sidecars/agy_monitor/host_bridge.mjs';
 import { assignModelColors, createAsyncUsageStatsCollector, createUsageStatsCollector, estimateModelCost, formatLocalYmd } from '../sidecars/agy_monitor/usage_stats.mjs';
 
 function varint(n) {
@@ -518,6 +519,106 @@ test('createTelemetryController isolates multi-window and empty home tabs from s
     const sidebarExplicit = await controller(convB, false);
     assert.equal(sidebarExplicit.session.model, 'ModelB');
   } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('quota requests require a local language service with an explicit port and reject redirects', async (t) => {
+  const originalEnv = process.env;
+  process.env = { ...originalEnv, ANTIGRAVITY_CSRF_TOKEN: 'fixture-csrf' };
+  t.after(() => { process.env = originalEnv; });
+
+  const fetch = t.mock.method(globalThis, 'fetch', async url => Response.json(
+    url.pathname.endsWith('/GetUserStatus')
+      ? { userStatus: { userTier: { id: 'agy-business-paygo-tier' } } }
+      : { groups: [] },
+  ));
+  const controller = createTelemetryController({ resolveLatest: () => '', readSettings: () => ({}) });
+
+  for (const invalidAddr of [
+    'language-service.example.invalid:43129',
+    '127.0.0.1',
+    'localhost',
+    '127.0.0.1:0',
+    '127.0.0.1:80',
+    'user:pass@127.0.0.1:43129',
+    '127.0.0.1:43129/extra',
+    '127.0.0.1:43129?x=1',
+  ]) {
+    process.env.ANTIGRAVITY_LS_ADDRESS = invalidAddr;
+    assert.deepEqual((await controller('')).quotaGroups, []);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+
+  process.env.ANTIGRAVITY_LS_ADDRESS = '127.0.0.1:43129';
+  assert.equal((await controller('')).cloudPaygo, true);
+  const requests = fetch.mock.calls.map(({ arguments: [url, options] }) => ({
+    url: url.href,
+    redirect: options.redirect,
+    token: options.headers['x-codeium-csrf-token'],
+  }));
+  assert.deepEqual(requests, ['RetrieveUserQuotaSummary', 'GetUserStatus'].map(method => ({
+    url: 'http://127.0.0.1:43129/exa.language_server_pb.LanguageServerService/' + method,
+    redirect: 'error',
+    token: 'fixture-csrf',
+  })));
+
+  // Separate controller instances maintain isolated quota caches and accept IPv6 loopback
+  const ipv6Controller = createTelemetryController({ resolveLatest: () => '', readSettings: () => ({}) });
+  process.env.ANTIGRAVITY_LS_ADDRESS = '[::1]:43129';
+  assert.equal((await ipv6Controller('')).cloudPaygo, true);
+  assert.equal(fetch.mock.calls[2].arguments[0].href, 'http://[::1]:43129/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary');
+});
+
+test('ensureLoopbackNoProxy appends local hosts without overwriting user NO_PROXY', () => {
+  const emptyEnv = {};
+  ensureLoopbackNoProxy(emptyEnv);
+  assert.equal(emptyEnv.NO_PROXY, '127.0.0.1,localhost,::1');
+
+  const customEnv = { NO_PROXY: 'corp.internal,127.0.0.1' };
+  ensureLoopbackNoProxy(customEnv);
+  assert.equal(customEnv.NO_PROXY, 'corp.internal,127.0.0.1,localhost,::1');
+
+  const posixEnv = { no_proxy: 'corp.internal', NO_PROXY: 'corp.internal' };
+  ensureLoopbackNoProxy(posixEnv);
+  assert.equal(posixEnv.NO_PROXY, 'corp.internal,127.0.0.1,localhost,::1');
+  assert.equal(posixEnv.no_proxy, 'corp.internal,127.0.0.1,localhost,::1');
+
+  const wildcardEnv = { NO_PROXY: '*' };
+  ensureLoopbackNoProxy(wildcardEnv);
+  assert.equal(wildcardEnv.NO_PROXY, '*');
+});
+
+test('monitor injector only connects to the discovered local CDP port', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-monitor-cdp-'));
+  const portFile = join(dir, 'DevToolsActivePort');
+  const localSocket = 'ws://127.0.0.1:43129/devtools/page/local';
+  const targets = [
+    { id: 'local', webSocketDebuggerUrl: localSocket },
+    { id: 'external', webSocketDebuggerUrl: 'ws://debug.example.invalid:43129/devtools/page/external' },
+    { id: 'other-port', webSocketDebuggerUrl: 'ws://127.0.0.1:43130/devtools/page/other-port' },
+  ].map(target => ({ ...target, type: 'page', url: 'http://127.0.0.1:43800/' }));
+  const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json(targets));
+  const webSocket = t.mock.method(globalThis, 'WebSocket', function () {
+    throw new Error('Stop before opening a socket in this test');
+  });
+  const injector = startMonitorInjector(async () => null, { portFile, diagFile: join(dir, 'diag.json') });
+
+  try {
+    writeFileSync(portFile, '65536');
+    await injector.tick();
+    assert.equal(fetch.mock.callCount(), 0);
+    assert.equal(webSocket.mock.callCount(), 0);
+
+    writeFileSync(portFile, '43129');
+    await injector.tick();
+    assert.equal(fetch.mock.callCount(), 1);
+    const [url, options] = fetch.mock.calls[0].arguments;
+    assert.equal(url, 'http://127.0.0.1:43129/json/list');
+    assert.equal(options.redirect, 'error');
+    assert.deepEqual(webSocket.mock.calls.map(({ arguments: [url] }) => url), [localSocket]);
+  } finally {
+    await injector.stop();
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

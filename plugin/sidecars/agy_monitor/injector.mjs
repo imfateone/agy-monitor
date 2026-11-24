@@ -1232,11 +1232,21 @@ export function startMonitorInjector(getPayload, options = {}) {
     }
     lastPort = port;
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) });
+      const cdpPort = Number(port);
+      if (!/^\d{1,5}$/.test(port) || cdpPort < 1 || cdpPort > 65535) throw new Error('Invalid CDP port');
+      const res = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, {
+        redirect: 'error',
+        signal: AbortSignal.timeout(3000),
+      });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const targets = await res.json();
       lastTargetSummary = targets.map(t => ({ type: t.type, url: String(t.url || '').split('?')[0].slice(0, 120) }));
-      cachedPages = targets.filter(t => t.type === 'page' && /^https?:\/\/127\.0\.0\.1:\d+\//.test(t.url || '') && t.webSocketDebuggerUrl);
+      cachedPages = targets.filter(target => {
+        if (target.type !== 'page' || !/^https?:\/\/127\.0\.0\.1:\d+\//.test(target.url || '')) return false;
+        const socketUrl = typeof target.webSocketDebuggerUrl === 'string' && URL.parse(target.webSocketDebuggerUrl);
+        return socketUrl?.protocol === 'ws:' && socketUrl.hostname === '127.0.0.1'
+          && Number(socketUrl.port || '80') === cdpPort && !socketUrl.username && !socketUrl.password;
+      });
       lastListAt = Date.now();
       listFailCount = 0;
       cdpState = 'ok';

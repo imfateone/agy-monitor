@@ -61,17 +61,36 @@ Antigravity 会话统计、分模型缓存命中分析、上下文占用拆解�
 
 ### 2. 克隆与安装
 ```powershell
-git clone https://github.com/<你的用户名>/agy-monitor.git
+git clone https://github.com/imfateone/agy-monitor.git
 cd agy-monitor
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-脚本会自动完成以下全部步骤：
-1. 将插件安装/更新到 `%USERPROFILE%\.gemini\config\plugins\agy-monitor`（若已有旧版会自动备份至 `./backups/`）；
-2. 自动配置桌面及开始菜单中的 `Antigravity` 快捷方式以启用页面监控挂接；
-3. 自动运行 `node --test` 单元测试验证插件可用。
+默认安装只处理插件文件（`install.ps1` 适用于 Windows）。脚本将插件安装或更新到 `%USERPROFILE%\.gemini\config\plugins\agy-monitor`，备份旧版至 `./backups/`，并运行 `node --test` 验证插件。安装后请完全退出 Antigravity，再从原有入口启动，即可使用右侧 AGY监控 面板。
 
-> 安装完成后，请通过桌面或开始菜单中的 `Antigravity` 快捷方式**完全退出并重启一次 Antigravity** 即可生效。
+> **macOS / Linux**：将 `./plugin` 复制到 `~/.gemini/config/plugins/agy-monitor`，运行 `node --test ~/.gemini/config/plugins/agy-monitor/test/telemetry.test.mjs` 验证后，完全退出并重启 Antigravity 即可。
+
+### 3. 可选启用底部监控栏和每轮用量胶囊
+
+只使用右侧面板时，可以跳过这一步。
+
+#### 沿用现有快捷方式
+
+1. 右键平时用来启动 Antigravity 的快捷方式，打开「属性」。
+2. 在「目标」栏原有命令末尾加一个空格，再加 `--remote-debugging-port=0`。如果程序路径带引号，把参数放在引号外。如果已有这项参数，把它改为 `--remote-debugging-port=0`，保留其他参数。
+3. 完全退出 Antigravity，再用该快捷方式重新启动。
+
+如果平时通过自定义脚本启动，请让原有脚本把 `--remote-debugging-port=0` 传给 Antigravity。
+
+#### 由安装器创建独立快捷方式
+
+直启 Antigravity 的用户如果想另建一个监控入口，可在安装时显式加上 `-CreateMonitorShortcut`。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -CreateMonitorShortcut
+```
+
+安装器会保留已有快捷方式，并在桌面创建 `Antigravity (AGY Monitor)`。完全退出 Antigravity 后，通过该入口启动即可显示页面监控。
 
 ---
 
